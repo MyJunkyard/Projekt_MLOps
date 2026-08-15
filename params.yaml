@@ -1,0 +1,71 @@
+data:
+  raw_path: data/raw/
+  processed_path: data/processed/features.parquet
+  reference_path: data/reference/reference.parquet
+  target_col: price_eur_mwh
+  date_col: timestamp
+  train_end: "2023-12-31"       # everything before this is training data
+  val_end:   "2024-06-30"       # validation window
+  # test set = everything after val_end
+
+temporal:
+  resolution: hourly            # hourly | daily | weekly
+  horizon: 24                   # how many steps ahead to predict
+  # horizon=24 at hourly resolution = predict next 24 hours
+  # horizon=7  at daily  resolution = predict next week
+  # horizon=4  at weekly resolution = predict next month (approx)
+
+features:
+  calendar:
+    enabled: true
+    include: [hour, day_of_week, month, week_of_year, is_holiday, is_workday]
+  weather:
+    enabled: false              # toggle for ablation experiments
+    variables: [temperature_2m, wind_speed_100m, shortwave_radiation, cloud_cover]
+    locations: [warsaw, krakow, gdansk, wroclaw]
+  lags:
+    enabled: false              # Stage 1: off; enable in Stage 2
+    periods: [1, 2, 3, 24, 48, 168]   # hours (168 = 1 week)
+  derivatives:
+    enabled: false              # toggle for ablation experiments
+    order: [1, 2]              # first and second derivative
+    smooth_window: 3            # smoothing before differencing to reduce noise
+  generation_mix:
+    enabled: false              # ENTSO-E generation by source
+    sources: [wind, solar, coal, gas, nuclear, hydro]
+  cross_border_flows:
+    enabled: false
+
+model:
+  # Stage 1: DummyRegressor for skeleton pipeline
+  type: sklearn.dummy.DummyRegressor
+  params:
+    strategy: "mean"
+
+  # Stage 2+: Uncomment for real model
+  # type: xgboost.XGBRegressor
+  # params:
+  #   n_estimators: 500
+  #   max_depth: 6
+  #   learning_rate: 0.05
+  #   subsample: 0.8
+  #   colsample_bytree: 0.8
+
+evaluation:
+  primary_metric: rmse          # used for model comparison and early stopping
+  metrics: [rmse, mae]          # Stage 1: minimal; add mape, r2 in Stage 2
+  residual_breakdown:           # which categorical variables to break residuals by
+    - hour
+    - day_of_week
+    - month
+    # is_holiday added in Stage 2 when real holiday data is available
+
+mlflow:
+  tracking_uri: http://localhost:5000
+  experiment_name: energy-forecast
+  model_name: energy-forecast-model   # registered model name in MLflow registry
+  run_tags: {}                  # filled programmatically
+
+serving:
+  port: 8000
+  model_stage: Production       # MLflow model registry stage to load

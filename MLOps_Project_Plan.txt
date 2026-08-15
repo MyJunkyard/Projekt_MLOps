@@ -1,0 +1,708 @@
+================================================================================
+  MLOps PROJECT PLAN
+  Energy Price Forecasting — Pipeline Engineering + ML Research Programme
+================================================================================
+
+OVERVIEW
+--------
+This document covers two interleaved things:
+
+  1. PIPELINE ENGINEERING — building a production-grade MLOps skeleton that
+     demonstrates infrastructure competency (MLflow, Docker, FastAPI, CI/CD,
+     drift detection, Airflow). This is the MLOps portfolio piece.
+
+  2. ML RESEARCH PROGRAMME — using that pipeline as a tool to systematically
+     study what drives forecast quality: feature selection/ablation, derivative
+     features, temporal resolution, prediction horizon, and model architecture.
+     This is the data science portfolio piece.
+
+They share the same codebase. Build the pipeline first; run the research
+programme through it. The pipeline becomes the instrument; the research
+programme generates the results that make the project scientifically
+interesting.
+
+Data source: ENTSO-E Transparency Platform (https://transparency.entsoe.eu)
+  - Day-ahead electricity prices for Poland (PSE bidding zone)
+  - Actual load, generation by source (wind, solar, gas, coal, etc.)
+  - Cross-border flows
+  - All downloadable as CSV, free registration required
+  - Hourly resolution going back to ~2015
+
+Secondary data sources to add during the research phase:
+  - Polish public holidays: publicly available JSON/CSV from multiple sources
+  - Weather data: Open-Meteo API (free, no key required for historical data)
+    Relevant variables: temperature, wind speed, solar irradiance, cloud cover
+    for the main Polish load centres (Warsaw, Kraków, Gdańsk, Wrocław)
+  - ERA5 reanalysis (via Copernicus CDS) for higher-quality historical weather
+
+
+================================================================================
+  REPOSITORY STRUCTURE  (set this up on day 1, even if most folders are empty)
+================================================================================
+
+energy-forecast-mlops/
+│
+├── data/
+│   ├── raw/                    # downloaded CSVs, never modified
+│   ├── processed/              # output of ingest.py and featurise.py
+│   └── reference/              # reference dataset for drift detection
+│
+├── src/
+│   ├── ingest.py               # download / load / validate raw data
+│   ├── featurise.py            # all feature engineering lives here
+│   ├── train.py                # model loading, training loop, MLflow logging
+│   ├── evaluate.py             # metrics, residual analysis, report generation
+│   ├── serve.py                # FastAPI app
+│   └── monitor.py              # Evidently drift reports
+│
+├── models/                     # local model artifacts (gitignored)
+├── reports/                    # generated HTML/PNG reports (gitignored)
+├── notebooks/                  # exploratory analysis only, not pipeline code
+│
+├── tests/
+│   ├── test_ingest.py
+│   ├── test_featurise.py
+│   └── test_serve.py
+│
+├── .github/workflows/
+│   └── ci.yml                  # lint + test on every push
+│
+├── docker-compose.yml
+├── Dockerfile
+├── params.yaml                 # single source of truth for experiment config
+├── Makefile                    # make ingest / make train / make serve / make all
+└── README.md
+
+
+================================================================================
+  PARAMS.YAML — DESIGN  (the spine of the swappable architecture)
+================================================================================
+
+data:
+  raw_path: data/raw/
+  processed_path: data/processed/features.parquet
+  reference_path: data/reference/reference.parquet
+  target_col: price_eur_mwh
+  date_col: timestamp
+  train_end: "2023-12-31"       # everything before this is training data
+  val_end:   "2024-06-30"       # validation window
+  # test set = everything after val_end
+
+temporal:
+  resolution: hourly            # hourly | daily | weekly
+  horizon: 24                   # how many steps ahead to predict
+  # horizon=24 at hourly resolution = predict next 24 hours
+  # horizon=7  at daily  resolution = predict next week
+  # horizon=4  at weekly resolution = predict next month (approx)
+
+features:
+  calendar:
+    enabled: true
+    include: [hour, day_of_week, month, week_of_year, is_holiday, is_workday]
+  weather:
+    enabled: false              # toggle for ablation experiments
+    variables: [temperature_2m, wind_speed_100m, shortwave_radiation, cloud_cover]
+    locations: [warsaw, krakow, gdansk, wroclaw]
+  lags:
+    enabled: true
+    periods: [1, 2, 3, 24, 48, 168]   # hours (168 = 1 week)
+  derivatives:
+    enabled: false              # toggle for ablation experiments
+    order: [1, 2]              # first and second derivative
+    smooth_window: 3            # smoothing before differencing to reduce noise
+  generation_mix:
+    enabled: false              # ENTSO-E generation by source
+    sources: [wind, solar, coal, gas, nuclear, hydro]
+  cross_border_flows:
+    enabled: false
+
+model:
+  type: xgboost.XGBRegressor    # fully qualified class name for dynamic import
+  params:
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+
+evaluation:
+  primary_metric: rmse          # used for model comparison and early stopping
+  metrics: [rmse, mae, mape, r2]
+  residual_breakdown:           # which categorical variables to break residuals by
+    - hour
+    - day_of_week
+    - month
+    - is_holiday
+
+mlflow:
+  tracking_uri: http://localhost:5000
+  experiment_name: energy-forecast
+  run_tags: {}                  # filled programmatically
+
+serving:
+  port: 8000
+  model_stage: Production       # MLflow model registry stage to load
+
+
+================================================================================
+  THE SWAPPABLE ARCHITECTURE — IMPLEMENTATION NOTES
+================================================================================
+
+WHAT IS WORTH MAKING SWAPPABLE (via params.yaml):
+  - Model class and all hyperparameters
+  - Which feature groups are active (boolean flags)
+  - Temporal resolution and prediction horizon
+  - Train/val/test split boundaries
+  - Which metrics to compute
+  - Which categorical variables to use in residual breakdown
+
+HOW TO IMPLEMENT MODEL SWAPPING:
+  Dynamic import pattern in train.py:
+
+    import importlib, yaml
+
+    def load_model(cfg):
+        # cfg["model"]["type"] = "xgboost.XGBRegressor"
+        module_path, class_name = cfg["model"]["type"].rsplit(".", 1)
+        module = importlib.import_module(module_path)
+        return getattr(module, class_name)(**cfg["model"]["params"])
+
+  This means switching from XGBoost to LightGBM to sklearn Ridge is:
+    model:
+      type: lightgbm.LGBMRegressor
+  No code change required.
+
+  For PyTorch models (later phase): define a thin wrapper class that exposes
+  .fit(X, y) and .predict(X) so the training loop doesn't need to know whether
+  it's talking to sklearn or PyTorch. One wrapper per architecture.
+
+WHAT IS NOT WORTH MAKING SWAPPABLE:
+  - Feature engineering logic in featurise.py
+    Each feature group is a self-contained function; the config flags decide
+    which functions are called. But the functions themselves are domain-specific
+    and should not be abstracted into a generic transformer.
+
+  - FastAPI endpoint structure
+    The serve.py is thin: it loads a model from the MLflow registry and calls
+    .predict(). That's the interface. Don't over-engineer it.
+
+  - Docker topology
+    The same docker-compose.yml works for all experiments. It just runs
+    different params.yaml files.
+
+MAKEFILE TARGETS (the single-command workflow):
+  make ingest     → run ingest.py (download + validate raw data)
+  make featurise  → run featurise.py with current params.yaml
+  make train      → run train.py (logs to MLflow, saves to registry)
+  make serve      → start FastAPI + MLflow via docker-compose
+  make report     → run monitor.py (generate Evidently drift + residual report)
+  make all        → ingest → featurise → train → serve → report
+  make test       → run pytest
+
+
+================================================================================
+  STAGE 1 — SKELETON PIPELINE  (Week 1)
+  Goal: something running end-to-end on day 1, even if trivial
+================================================================================
+
+PHILOSOPHY:
+  Never build infrastructure waiting for a "real" model. Get a DummyRegressor
+  running through the full pipeline first. Every subsequent step is a
+  substitution, not new construction.
+
+TODO:
+
+  [ ] Set up repository structure (all folders, empty __init__.py files)
+
+  [ ] docker-compose.yml with three services:
+        - mlflow: official MLflow image, port 5000, PostgreSQL as backend store
+        - postgres: PostgreSQL 15, volume-mounted for persistence
+        - api: your FastAPI container, port 8000
+      Confirm: `docker compose up` brings all three up without errors.
+
+  [ ] params.yaml initial version
+        - Set model.type to "sklearn.dummy.DummyRegressor"
+        - All feature flags set to false except calendar.enabled: true
+        - Minimal metrics list: [rmse, mae]
+
+  [ ] ingest.py (stub version)
+        - For now: generate synthetic data (np.random or a sine wave)
+          mimicking the shape of hourly price data (timestamp + price column)
+        - Validate schema: assert required columns present, no nulls,
+          timestamps monotonically increasing
+        - Save to data/raw/synthetic.csv
+        - TODO marker: replace with ENTSO-E download in Stage 2
+
+  [ ] featurise.py (stub version)
+        - Load raw CSV
+        - Add only calendar features: hour, day_of_week, month
+        - Create lag features for periods in params.yaml
+        - Split into train/val/test according to params.yaml dates
+        - Save as data/processed/features.parquet
+        - Copy train split to data/reference/ (used later for drift detection)
+
+  [ ] train.py
+        - Load features.parquet
+        - Load model dynamically from params.yaml (dynamic import)
+        - Fit on train split
+        - Evaluate on val split (all metrics in params.yaml)
+        - Log params, metrics, and model artifact to MLflow
+        - Register model in MLflow registry under experiment name
+        - Tag run with: git commit hash, params.yaml hash, timestamp
+
+  [ ] evaluate.py (stub version)
+        - Load model from MLflow registry
+        - Compute metrics on test split
+        - Print results table to stdout
+        - TODO: add residual breakdown plots in Stage 4
+
+  [ ] serve.py
+        - FastAPI app with two endpoints:
+            GET  /health   → {"status": "ok", "model_version": "..."}
+            POST /predict  → accept JSON array of feature dicts, return predictions
+        - Load model from MLflow registry at startup (model_stage from params)
+        - No input validation yet (add in Stage 3)
+
+  [ ] Makefile with: ingest, featurise, train, serve, test, all targets
+
+  [ ] Confirm end-to-end: `make all` produces a running API that returns
+      predictions (even if they're just the mean of training data)
+
+  CHECKPOINT: you can run `make all`, open MLflow UI at localhost:5000, see
+  one logged experiment run with metrics, and curl the API for a prediction.
+
+
+================================================================================
+  STAGE 2 — REAL DATA, REAL MODEL  (Week 2)
+  Goal: first genuinely useful experiment
+================================================================================
+
+TODO:
+
+  [ ] ENTSO-E data download
+        - Register at transparency.entsoe.eu (free)
+        - Download day-ahead prices for PSE bidding zone (Poland), 2018–present
+        - Download actual load data for same period
+        - Store raw CSVs in data/raw/ (gitignored; add download script)
+        - Write a download script using the ENTSO-E RESTful API or the
+          entsoe-py Python client (pip install entsoe-py)
+        - Validate: check for gaps, outliers, timezone handling
+          (ENTSO-E data is in UTC; Polish local time has DST — handle carefully)
+          Gaps to expect: DST transitions (23h and 25h days), occasional NaNs
+          Strategy: forward-fill gaps ≤ 2 hours; flag longer gaps
+
+  [ ] featurise.py — real calendar features
+        - hour of day (0–23)
+        - day of week (0–6)
+        - month (1–12)
+        - week of year (1–53)
+        - is_holiday: Polish public holidays
+          Source: workalendar Python package or a static CSV
+          Include: New Year, Easter (Mon), Labour Day, Constitution Day,
+          Corpus Christi, Assumption, All Saints, Independence, Christmas (×2)
+        - is_workday: not weekend AND not holiday
+        - days_to_next_holiday, days_since_last_holiday
+          (price spikes often appear in the days before a long weekend)
+
+  [ ] Replace DummyRegressor with XGBoost
+        - params.yaml: model.type → "xgboost.XGBRegressor"
+        - Reasonable starting hyperparameters (see params.yaml template above)
+        - Log feature importances to MLflow as a JSON artifact
+
+  [ ] evaluate.py — proper metrics
+        - RMSE, MAE, MAPE (be careful: MAPE is undefined when price = 0,
+          which can happen with negative prices; use sMAPE or mask zeros)
+        - R²
+        - Plot: actual vs predicted for val period, save as PNG artifact in MLflow
+
+  [ ] Baseline comparison
+        - Train and log two additional "models" as separate MLflow runs:
+            - Persistence baseline: predict tomorrow = today (lag-1 model)
+            - Seasonal naive: predict tomorrow = same hour last week (lag-168)
+          Your XGBoost should beat both. If it doesn't, something is wrong
+          with the feature engineering or data handling.
+        - Log these baselines under the same MLflow experiment for easy comparison
+
+  [ ] Makefile: add `make compare` target that opens MLflow UI to the
+      experiment view (or prints a comparison table to stdout)
+
+  CHECKPOINT: MLflow UI shows three runs (baseline-persistence,
+  baseline-seasonal-naive, xgboost-v1) with comparable metrics. XGBoost
+  wins. You can explain why by looking at feature importances.
+
+
+================================================================================
+  STAGE 3 — FEATURE ENGINEERING + REPRODUCIBILITY  (Week 3)
+  Goal: the pipeline feels professional; experiments are reproducible
+================================================================================
+
+TODO:
+
+  [ ] params.yaml hash logging
+        - Compute SHA256 of params.yaml at the start of each train run
+        - Log as MLflow tag: params_hash = "abc123..."
+        - This ensures any run can be reproduced exactly by checking out the
+          right git commit and restoring the right params.yaml
+
+  [ ] Input validation in serve.py
+        - Define a Pydantic model for the request body
+        - Validate: all expected feature columns present, types correct,
+          timestamp is parseable, values in plausible ranges
+        - Return 422 with clear error message on invalid input
+
+  [ ] Weather features (Open-Meteo integration)
+        - pip install openmeteo-requests
+        - Fetch historical hourly data for Warsaw (primary) and optionally
+          Kraków, Gdańsk, Wrocław
+        - Variables: temperature_2m, wind_speed_100m, shortwave_radiation,
+          cloud_cover, precipitation
+        - Merge with price data on timestamp (UTC, be careful)
+        - Add to featurise.py gated by features.weather.enabled flag in params
+        - Sanity check: wind_speed_100m should correlate with wind generation
+          in the ENTSO-E generation mix data
+
+  [ ] Lag features — complete implementation
+        - Lags of the target (price): [1, 2, 3, 24, 48, 168] hours
+        - Rolling statistics: 24h rolling mean, 24h rolling std, 168h rolling mean
+          These capture short-term volatility and weekly seasonality
+        - Important: compute lags on the full dataset BEFORE splitting train/val/test
+          to avoid data leakage from the future. But during serving, lags must
+          come from the database of recent actuals — add a TODO for this.
+
+  [ ] Generation mix features (ENTSO-E)
+        - Download actual generation by source for Poland
+        - Add: wind_mw, solar_mw, coal_mw, gas_mw as features
+        - These are available with 1h lag in real-time; in forecasting context,
+          you'll use the forecast of generation (also available on ENTSO-E)
+        - Gate with features.generation_mix.enabled flag
+
+  [ ] Data versioning discipline
+        - Add a data manifest: after running ingest.py, write a JSON file
+          data/raw/manifest.json with:
+            { "downloaded_at": "...", "date_range": ["...", "..."],
+              "row_count": 12345, "sha256": "..." }
+        - Log this manifest as an MLflow artifact in every training run
+
+  CHECKPOINT: `make all` from scratch downloads data, engineers all features,
+  trains model, logs everything to MLflow. A colleague could clone the repo
+  and reproduce your best run exactly.
+
+
+================================================================================
+  STAGE 4 — THE RESEARCH PROGRAMME  (Weeks 4–6)
+  Goal: systematic experiments answering specific scientific questions
+================================================================================
+
+PHILOSOPHY:
+  Each experiment is a params.yaml change + one MLflow run.
+  Log everything. Compare in MLflow UI. Write findings in a lab notebook
+  (a markdown file in the repo: EXPERIMENTS.md).
+
+  Structure each entry in EXPERIMENTS.md as:
+    ## EXP-001: Baseline calendar features only
+    Hypothesis: calendar features alone capture most of the weekly seasonality.
+    Config diff: all feature flags false except calendar.enabled: true
+    Result: RMSE=..., MAE=..., R²=...
+    Finding: ...
+
+------------------------------------------------------------------------
+  EXPERIMENT SERIES A: FEATURE ABLATION
+  Question: which feature groups add value, and how much?
+------------------------------------------------------------------------
+
+  [ ] EXP-001: Calendar features only (baseline, already done in Stage 2)
+
+  [ ] EXP-002: Calendar + weather
+        params diff: features.weather.enabled: true
+        Hypothesis: weather explains solar/wind generation and therefore price
+        Expected: improvement, especially in hours with high renewable penetration
+
+  [ ] EXP-003: Calendar + lags only
+        params diff: features.weather.enabled: false, lags.enabled: true
+        Expected: strong improvement — price has strong autocorrelation
+
+  [ ] EXP-004: Calendar + lags + weather
+        All three enabled. Expected: best so far.
+
+  [ ] EXP-005: Add generation mix
+        Hypothesis: knowing actual wind/solar generation improves forecast
+        Caveat: in real deployment you'd need generation forecasts, not actuals.
+        Note this in EXPERIMENTS.md — it's a data leakage risk in deployment.
+
+  [ ] EXP-006: Add cross-border flows
+        Polish prices are coupled to DE/CZ/SK markets via interconnectors.
+        Hypothesis: import/export flows add signal about price pressure.
+
+  [ ] EXP-007: Holiday-adjacent features
+        days_to_next_holiday, days_since_last_holiday, is_long_weekend
+        Hypothesis: prices behave differently in the 1–2 days before a holiday.
+        Look for this in residual analysis from EXP-004 before running.
+
+------------------------------------------------------------------------
+  EXPERIMENT SERIES B: DERIVATIVE FEATURES
+  Question: do explicit first and second derivatives of price improve forecasts?
+------------------------------------------------------------------------
+
+  IMPLEMENTATION NOTE:
+    Raw price derivatives amplify noise. Before computing:
+      1. Apply a short rolling mean (window=3h) to smooth
+      2. Then compute diff(1) for first derivative, diff(2) for second
+    Log the smoothing window as a hyperparameter.
+
+    Conceptually: first derivative = price velocity (is price rising or falling?)
+    Second derivative = price acceleration (is the rise/fall speeding up?)
+    These capture momentum that lag features partially miss.
+
+  [ ] EXP-008: Add first derivative of price (smoothed)
+        params diff: features.derivatives.enabled: true, order: [1]
+        Compare to EXP-004 (same other features)
+
+  [ ] EXP-009: Add first + second derivative
+        params diff: features.derivatives.order: [1, 2]
+        Watch for: if second derivative hurts, noise is dominating.
+
+  [ ] EXP-010: Vary smoothing window (3, 6, 12 hours)
+        If derivatives help, find the right smoothing level.
+        Log smooth_window as an MLflow parameter.
+
+  [ ] EXP-011: Derivatives of weather variables
+        Same logic: rate of change of temperature or wind speed may be
+        more predictive than the level. Try wind_speed first derivative.
+
+  RESIDUAL ANALYSIS for Series B:
+    After each run, plot residuals vs price-change-direction (rising/falling).
+    If derivatives help, residuals should be more symmetric around zero in
+    periods of rapid price movement.
+
+------------------------------------------------------------------------
+  EXPERIMENT SERIES C: TEMPORAL RESOLUTION
+  Question: does the right time tick depend on the prediction task?
+------------------------------------------------------------------------
+
+  IMPLEMENTATION NOTE:
+    Resampling is handled in featurise.py, gated by params.temporal.resolution.
+    When resampling to daily: use mean price for the day as target (or VWAP).
+    When resampling to weekly: use mean price for the week.
+    Lag periods need to rescale accordingly (params.lags.periods in native units).
+
+  [ ] EXP-012: Daily resolution, 7-day horizon
+        Resample hourly data to daily. Predict next 7 days.
+        Features: day-of-week, week-of-year, is_holiday, 7-day lags.
+
+  [ ] EXP-013: Weekly resolution, 4-week horizon
+        Resample to weekly. Predict next 4 weeks.
+        Features: week-of-year, month, lagged weekly means.
+
+  [ ] EXP-014: Hourly, 48-hour horizon (extend from 24h)
+        Does accuracy degrade with horizon? At what rate?
+        Implement as multi-step: train 24 separate models (one per horizon step)
+        OR use a single model with horizon step as a feature.
+        Note: single model is simpler to deploy; separate models usually win.
+
+  [ ] EXP-015: Hourly, 168-hour horizon (1 week ahead at hourly resolution)
+        At what horizon does the hourly model become worse than the daily model?
+        This is a scientifically interesting crossover point.
+
+------------------------------------------------------------------------
+  EXPERIMENT SERIES D: MODEL ARCHITECTURE COMPARISON
+  Question: for this problem and dataset, which model class is best?
+------------------------------------------------------------------------
+
+  [ ] EXP-016: LightGBM (same hyperparameters as XGBoost baseline)
+        params diff: model.type: "lightgbm.LGBMRegressor"
+        Usually faster than XGBoost; sometimes better on tabular data.
+
+  [ ] EXP-017: Ridge regression (linear baseline)
+        params diff: model.type: "sklearn.linear_model.Ridge"
+        If linear model is within 10% of XGBoost, the features are doing
+        the work, not the model. Important diagnostic.
+
+  [ ] EXP-018: Random Forest
+        params diff: model.type: "sklearn.ensemble.RandomForestRegressor"
+        Useful comparison for understanding XGBoost's advantage.
+
+  [ ] EXP-019: CatBoost (handles categorical features natively)
+        Interesting for is_holiday, day_of_week without encoding.
+        params diff: model.type: "catboost.CatBoostRegressor"
+
+  [ ] EXP-020: LSTM (first neural network experiment)
+        Requires PyTorch wrapper implementing .fit()/.predict() interface.
+        Build the wrapper as a separate class; the training loop is
+        the main new code. Log loss curve as MLflow artifact.
+        Key hyperparameters to expose: hidden_size, num_layers, dropout,
+        sequence_length, batch_size, learning_rate.
+        Only run this after tabular models are well-tuned —
+        LSTMs rarely beat gradient boosting on tabular time-series
+        without careful feature engineering and longer training.
+
+  [ ] EXP-021: Temporal Fusion Transformer (TFT)
+        State-of-the-art for multi-horizon time-series forecasting.
+        Use pytorch-forecasting library (wraps PyTorch Lightning).
+        Highest complexity; run last, after understanding the data well.
+
+------------------------------------------------------------------------
+  RESIDUAL ANALYSIS — runs alongside all series
+------------------------------------------------------------------------
+
+  After every experiment run, evaluate.py should produce:
+
+  [ ] Residuals vs time (look for systematic drift or seasonality in errors)
+  [ ] Residuals broken down by:
+        - hour of day (are certain hours harder to predict?)
+        - day of week (are weekends harder?)
+        - month (seasonal difficulty?)
+        - is_holiday (do holidays cause systematic errors?)
+        - price quantile (does the model fail on price spikes?)
+  [ ] Actual vs predicted plot for a sample week from val and test sets
+  [ ] All plots saved as PNG artifacts in MLflow under the run
+
+  Implementation: add to evaluate.py as a function called after every
+  training run. Gate with a flag in params (evaluation.generate_plots: true).
+
+
+================================================================================
+  STAGE 5 — PRODUCTION INFRASTRUCTURE  (Week 5–6, parallel with Stage 4)
+================================================================================
+
+TODO:
+
+  [ ] GitHub Actions CI (ci.yml)
+        Triggers on: push to main, pull request
+        Steps:
+          1. Checkout code
+          2. Set up Python 3.11
+          3. pip install -r requirements.txt
+          4. ruff check src/ tests/        (linting)
+          5. pytest tests/ -v              (unit tests)
+          6. Optional: run make train on a tiny synthetic dataset to confirm
+             the pipeline runs end-to-end (smoke test, not a real training run)
+
+  [ ] Unit tests — what to test (not the model, the pipeline):
+        test_ingest.py:
+          - Schema validation catches missing columns
+          - Gap detection works on synthetic data with injected gaps
+          - DST handling: 23h and 25h days are handled without duplication/loss
+
+        test_featurise.py:
+          - Calendar features are correct for known dates
+            (e.g., 2024-04-01 is Easter Monday in Poland → is_holiday=True)
+          - Lag features do not leak future data (lag-1 of row N uses row N-1)
+          - Derivative computation is correct for a known sequence
+          - Feature flags in params.yaml correctly enable/disable feature groups
+
+        test_serve.py:
+          - /health returns 200
+          - /predict returns 422 on malformed input
+          - /predict returns a float for valid input
+
+  [ ] Evidently drift detection (monitor.py)
+        - At end of each training run, compare current training set
+          against data/reference/ (saved in Stage 1)
+        - Generate DataDriftReport and DataQualityReport
+        - Save HTML report to reports/ and as MLflow artifact
+        - Log a single drift_score metric to MLflow for easy comparison
+        - Update reference dataset when a new model is promoted to Production
+
+  [ ] Airflow pipeline (optional but valuable to include)
+        - Single DAG: energy_forecast_retrain
+        - Schedule: weekly (cron: "0 3 * * 1" — 3am Monday)
+        - Tasks:
+            1. ingest (download latest ENTSO-E data)
+            2. featurise (rebuild features with new data)
+            3. train (run training, log to MLflow)
+            4. evaluate (run on test set, log metrics)
+            5. drift_check (run Evidently, fail DAG if severe drift)
+            6. promote (if metrics better than current Production model,
+               promote new model in MLflow registry)
+        - Run Airflow in Docker (add airflow service to docker-compose.yml)
+
+  [ ] Model registry workflow
+        Stages: None → Staging → Production → Archived
+        - train.py always registers to Staging
+        - A separate promote.py script compares Staging vs Production metrics
+          and promotes if Staging is better
+        - serve.py always loads from Production stage
+        - This means you can retrain freely without affecting the live API
+
+  [ ] README.md (final, before calling the project done)
+        Sections:
+          - Project overview (2–3 sentences, what it does and why)
+          - Architecture diagram (simple ASCII or a PNG)
+          - Quick start: `git clone → docker compose up → make all`
+          - Experiment results table (best results from each series A–D)
+          - Key findings (3–5 bullet points from EXPERIMENTS.md)
+          - How to run a new experiment (change params.yaml, run make train)
+          - Data sources and licences
+
+  CHECKPOINT: A stranger can clone the repo, run `docker compose up && make all`,
+  and within 30 minutes have a running API, an MLflow UI with logged experiments,
+  and a drift report. This is the bar for "production-grade portfolio project."
+
+
+================================================================================
+  SEQUENCING SUMMARY
+================================================================================
+
+  Week 1   Stage 1    Skeleton: DummyRegressor running end-to-end in Docker
+  Week 2   Stage 2    Real ENTSO-E data + XGBoost + baselines in MLflow
+  Week 3   Stage 3    Full feature engineering + reproducibility discipline
+  Week 4   Stage 4A   Feature ablation experiments (EXP-001 to EXP-007)
+  Week 5   Stage 4B   Derivative and resolution experiments (EXP-008 to EXP-015)
+             + 5      CI/CD, unit tests, Evidently drift detection
+  Week 6   Stage 4C   Model architecture comparison (EXP-016 to EXP-021)
+             + 5      Airflow, model registry workflow, README
+
+
+================================================================================
+  WHAT TO SAY IN AN INTERVIEW ABOUT THIS PROJECT
+================================================================================
+
+  At pipeline level:
+    "I can run a full experiment comparing XGBoost, LightGBM, and Ridge
+     regression by changing three lines in params.yaml. MLflow logs every run
+     automatically — config, metrics, feature importances, residual plots —
+     so I can compare 20 experiments in the UI in about 30 seconds. The model
+     registry means I can retrain freely without touching the live API."
+
+  At research level:
+    "I ran a systematic feature ablation study. The most interesting finding
+     was [X]. I also tested whether explicit first and second derivatives of
+     price add value — they do/don't because [finding]. The model fails most
+     on [hour/season/holiday type], which tells me [next thing to try]."
+
+  On deployment:
+    "The full pipeline runs in Docker Compose: Postgres as the MLflow backend
+     store, MLflow tracking server, and FastAPI serving the registered model.
+     Evidently generates a drift report every time a new model is trained,
+     comparing the incoming data distribution against the reference dataset."
+
+
+================================================================================
+  NOTES FOR LATER — NEURAL NETWORK PHASE
+================================================================================
+
+  Do not start here. Only move to neural networks after:
+    (a) You have clean tabular results from Series A–D
+    (b) You understand which features matter and why
+    (c) You have a well-tuned XGBoost/LightGBM baseline to beat
+
+  The most likely useful architectures for this problem, in order of complexity:
+    1. LSTM: straightforward to implement with PyTorch; understands sequences
+             natively. Likely competitive with XGBoost if features are sparse.
+    2. Temporal Fusion Transformer (TFT): state of the art for multi-horizon
+             tabular time-series. pytorch-forecasting library wraps it.
+             Interpretable: produces attention weights showing which lags matter.
+    3. N-BEATS / N-HiTS: pure time-series decomposition networks.
+             No feature engineering needed — they learn seasonality internally.
+             Interesting comparison: do hand-crafted features beat the network's
+             learned decomposition?
+
+  Neural network hyperparameter search:
+    Use Optuna for hyperparameter optimisation (integrates with MLflow).
+    Define the search space in params.yaml; Optuna samples it.
+    Log each trial as a separate MLflow run.
+    This adds one more portfolio-worthy tool to the stack.
+
+================================================================================
+  END OF DOCUMENT
+================================================================================

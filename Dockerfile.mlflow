@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install MLflow with PostgreSQL support
+RUN pip install --no-cache-dir \
+    "mlflow>=2.8,<3.0" \
+    psycopg2-binary>=2.9
+
+EXPOSE 5000
+
+# Default command — overridden by docker-compose
+CMD ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000"]

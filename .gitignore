@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# Data files (raw CSVs are large, keep only .gitkeep)
+data/raw/*.csv
+data/processed/*.parquet
+data/reference/*.parquet
+
+# Model artifacts (local)
+models/*
+!models/.gitkeep
+
+# Reports
+reports/*
+!reports/.gitkeep
+
+# MLflow
+mlruns/
+mlartifacts/
+.mlflow/
+*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Secrets (local credentials, not committed)
+secrets/
+!secrets/.env.example
+
+# Documentation (build artifacts, not source)
+docs/

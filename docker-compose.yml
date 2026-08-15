@@ -1,0 +1,73 @@
+secrets:
+  postgres_password:
+    file: secrets/postgres_password.txt
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: energy-postgres
+    env_file:
+      - secrets/.env
+    secrets:
+      - postgres_password
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    container_name: energy-mlflow
+    ports:
+      - "5000:5000"
+    env_file:
+      - secrets/.env
+    secrets:
+      - postgres_password
+    command: >
+      sh -c '
+        PGPASS=$(cat /run/secrets/postgres_password) &&
+        export _MLFLOW_SERVER_FILE_STORE=postgresql://$${POSTGRES_USER}:$$PGPASS@postgres:5432/$${POSTGRES_DB} &&
+        export _MLFLOW_SERVER_ARTIFACT_ROOT=/mlartifacts &&
+        export _MLFLOW_SERVER_ARTIFACT_DESTINATION=/mlartifacts &&
+        gunicorn -b 0.0.0.0:5000 -w 4 mlflow.server:app
+      '
+    volumes:
+      - mlartifacts:/mlartifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  api:
+    build: .
+    container_name: energy-api
+    ports:
+      - "8000:8000"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./src:/app/src
+      - ./params.yaml:/app/params.yaml
+      - ./data:/app/data
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  mlartifacts:
