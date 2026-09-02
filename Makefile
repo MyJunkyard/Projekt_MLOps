@@ -4,6 +4,8 @@
 # Single-command workflow for the full pipeline.
 #
 # Prerequisites:
+#   - GNU Make installed (Linux/macOS: built-in; Windows: install via
+#     Chocolatey `choco install make` or Scoop `scoop install make`)
 #   - Docker Compose running (run `make up` first)
 #   - Python .venv activated for local commands
 #

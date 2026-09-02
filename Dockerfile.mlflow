@@ -2,9 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install MLflow with PostgreSQL support
+# Install MLflow with PostgreSQL support.
+# Keep in the 3.x line to match the client: a 3.x client calls the
+# /api/2.0/mlflow/logged-models endpoint, which 2.x servers do not expose
+# (404). Allowing >=3.14,<4.0 lets newer 3.x releases in while preventing
+# a downgrade below the endpoint that the 3.x client requires.
 RUN pip install --no-cache-dir \
-    "mlflow>=2.8,<3.0" \
+    "mlflow>=3.14,<4.0" \
     psycopg2-binary>=2.9
 
 EXPOSE 5000

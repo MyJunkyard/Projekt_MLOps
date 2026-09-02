@@ -14,7 +14,10 @@ import pandas as pd
 
 from src.utils import get_split_masks, load_config, setup_logging
 
-logger = logging.getLogger(__name__)
+# Stable module name (not `__name__` — under `python -m` it becomes
+# `"__main__"` and would bypass the configured src logger).
+MODULE_LOGGER_NAME = "src.featurise"
+logger = logging.getLogger(MODULE_LOGGER_NAME)
 
 
 def load_raw_data(path: str) -> pd.DataFrame:
@@ -370,7 +373,7 @@ def save_processed_data(
 def main():
     """Orchestrate feature engineering pipeline."""
     cfg = load_config()
-    setup_logging(cfg)
+    setup_logging(cfg, logger_name=MODULE_LOGGER_NAME)
     raw_path = Path(cfg["data"]["raw_path"]) / "entsoe_prices.csv"
     processed_path = cfg["data"]["processed_path"]
     reference_path = cfg["data"]["reference_path"]

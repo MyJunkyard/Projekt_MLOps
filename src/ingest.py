@@ -27,7 +27,10 @@ try:
 except ImportError:
     from entsoe import EntsoePandasClient as EntsoeClient  # type: ignore
 
-logger = logging.getLogger(__name__)
+# Stable module name (not `__name__` — under `python -m` it is `"__main__"`
+# and would bypass the configured src logger).
+MODULE_LOGGER_NAME = "src.ingest"
+logger = logging.getLogger(MODULE_LOGGER_NAME)
 
 # Plausible price range for European day-ahead electricity prices (EUR/MWh).
 # Negative prices occur (e.g. wind surplus); extreme outliers indicate errors.
@@ -627,7 +630,7 @@ def save_raw_data(df: pd.DataFrame, path: str) -> str:
 def main():
     """Orchestrate: download → validate → fill → drop → save → manifest."""
     cfg = load_config()
-    setup_logging(cfg)
+    setup_logging(cfg, logger_name=MODULE_LOGGER_NAME)
     raw_path = cfg["data"]["raw_path"]
     max_gap_periods = cfg.get("data", {}).get("max_gap_periods", 2)
     fill_method = cfg.get("data", {}).get("fill_method", "ffill")

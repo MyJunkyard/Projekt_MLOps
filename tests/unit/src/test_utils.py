@@ -1,12 +1,23 @@
 """
-Unit tests for src/utils.py — load_config, compute_metrics, get_split_masks.
+Unit tests for src/utils.py — load_config, compute_metrics, get_split_masks,
+and setup_logging.
 """
+
+import logging
+from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import pytest
 import yaml
 
-from src.utils import compute_metrics, get_split_masks, load_config
+from src.utils import (
+    DEFAULT_LOG_FILE,
+    compute_metrics,
+    get_split_masks,
+    load_config,
+    setup_logging,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -134,3 +145,89 @@ class TestGetSplitMasks:
         assert train.dtype == bool
         assert val.dtype == bool
         assert test.dtype == bool
+
+
+# ---------------------------------------------------------------------------
+# setup_logging
+# ---------------------------------------------------------------------------
+class TestSetupLogging:
+    """Tests for setup_logging — isolated per-test via unique logger names.
+
+    setup_logging adds at most one FileHandler and one StreamHandler per
+    logger, keyed by handler type. Using a unique logger name per test keeps
+    each case independent of the global ``src`` logger state.
+    """
+
+    def _flush(self, logger_name: str) -> None:
+        """Flush all handlers attached to a (custom) logger so records hit disk."""
+        logger = logging.getLogger(logger_name)
+        for handler in logger.handlers:
+            handler.flush()
+
+    def test_creates_file_handler_and_writes_log(self, tmp_path):
+        """Positive: setup_logging adds a FileHandler mirroring log records."""
+        log_file = tmp_path / "logs" / "pipeline.log"
+        name = f"src_ph_{uuid4().hex}"
+        cfg = {"logging": {"level": "DEBUG", "file": str(log_file)}}
+
+        logger = setup_logging(cfg, logger_name=name)
+        assert any(isinstance(h, logging.FileHandler) for h in logger.handlers)
+
+        logging.getLogger(f"{name}.child").info("hello from file")
+        self._flush(logger.name)
+
+        assert log_file.exists()
+        assert "hello from file" in log_file.read_text(encoding="utf-8")
+
+    def test_default_file_in_tempdir(self):
+        """Positive: with no logging.file, logs to DEFAULT_LOG_FILE in temp."""
+        name = f"src_def_{uuid4().hex}"
+        setup_logging({}, logger_name=name)
+
+        logging.getLogger(f"{name}.child").info("default temp file check")
+        self._flush(name)
+
+        default_file = Path(DEFAULT_LOG_FILE)
+        assert default_file.exists()
+        assert "default temp file check" in default_file.read_text(encoding="utf-8")
+
+    def test_custom_file_from_config(self, tmp_path):
+        """Positive: cfg['logging.file'] overrides DEFAULT_LOG_FILE."""
+        log_file = tmp_path / "custom" / "run.log"
+        name = f"src_cus_{uuid4().hex}"
+        setup_logging({"logging": {"file": str(log_file)}}, logger_name=name)
+
+        logging.getLogger(f"{name}.child").warning("custom path check")
+        self._flush(name)
+
+        assert log_file.exists()
+        assert "custom path check" in log_file.read_text(encoding="utf-8")
+        assert str(log_file) != DEFAULT_LOG_FILE
+
+    def test_idempotent_no_duplicate_file_handler(self, tmp_path):
+        """Positive: repeated calls adjust level but do not add handlers."""
+        log_file = tmp_path / "pipeline.log"
+        name = f"src_idem_{uuid4().hex}"
+
+        setup_logging(
+            {"logging": {"level": "DEBUG", "file": str(log_file)}},
+            logger_name=name,
+        )
+        setup_logging(
+            {"logging": {"level": "INFO", "file": str(log_file)}},
+            logger_name=name,
+        )
+
+        logger = logging.getLogger(name)
+        file_handlers = [
+            h for h in logger.handlers if isinstance(h, logging.FileHandler)
+        ]
+        assert len(file_handlers) == 1
+        assert logger.level == logging.INFO
+
+    def test_missing_logging_section_falls_back_to_info(self):
+        """Minimal config (no logging section) falls back to INFO + a handler."""
+        name = f"src_min_{uuid4().hex}"
+        logger = setup_logging({}, logger_name=name)
+        assert logger.level == logging.INFO
+        assert any(isinstance(h, logging.FileHandler) for h in logger.handlers)

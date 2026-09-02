@@ -1,0 +1,15 @@
+{
+  "downloaded_at": "2026-09-02T16:21:48.523461+00:00",
+  "date_range": [
+    "2020-01-01T00:00:00+00:00",
+    "2025-09-14T07:00:00+00:00"
+  ],
+  "row_count": 50000,
+  "sha256": "e96575c7ad6fcad26b705e093ded28b95d2ffc61fe57cbf09bed8ceddb279a1b",
+  "n_imputed_rows": 0,
+  "n_dropped_rows": 0,
+  "n_unfilled_rows": 0,
+  "max_gap_periods": 2,
+  "fill_method": "ffill",
+  "freq": "h"
+}

@@ -20,11 +20,14 @@ from pydantic import BaseModel
 
 from src.utils import load_config, setup_logging
 
-logger = logging.getLogger(__name__)
+# Stable module name (not `__name__` — the FastAPI/uvicorn runner sets it to
+# `"__main__"` or another name, which would bypass the configured src logger).
+MODULE_LOGGER_NAME = "src.serve"
+logger = logging.getLogger(MODULE_LOGGER_NAME)
 
 # Global config and model (loaded at startup)
 cfg = load_config()
-setup_logging(cfg)
+setup_logging(cfg, logger_name=MODULE_LOGGER_NAME)
 model = None
 model_version = "unknown"
 

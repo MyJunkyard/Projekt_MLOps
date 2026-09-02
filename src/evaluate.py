@@ -21,7 +21,10 @@ import pandas as pd
 
 from src.utils import compute_metrics, get_split_masks, load_config, setup_logging
 
-logger = logging.getLogger(__name__)
+# Stable module name (not `__name__` — under `python -m` it is
+# `"__main__"` and would bypass the configured src logger).
+MODULE_LOGGER_NAME = "src.evaluate"
+logger = logging.getLogger(MODULE_LOGGER_NAME)
 
 
 def load_model_from_registry(cfg: dict):
@@ -255,7 +258,7 @@ def residual_breakdown(
 def main():
     """Orchestrate evaluation: metrics, plots, and residual breakdown."""
     cfg = load_config()
-    setup_logging(cfg)
+    setup_logging(cfg, logger_name=MODULE_LOGGER_NAME)
     processed_path = cfg["data"]["processed_path"]
     reports_dir = Path("reports")
 

@@ -22,7 +22,10 @@ from mlflow.sklearn import log_model
 
 from src.utils import compute_metrics, get_split_masks, load_config, setup_logging
 
-logger = logging.getLogger(__name__)
+# Stable module logger name (not __name__ — `python -m` sets __name__ to
+# "__main__", which would bypass the configured src handlers).
+MODULE_LOGGER_NAME = "src.train"
+logger = logging.getLogger(MODULE_LOGGER_NAME)
 
 
 class PersistenceModel:
@@ -395,11 +398,14 @@ def log_to_mlflow(
         for name, value in metrics.items():
             mlflow.log_metric(name, value)
 
-        # Log model artifact
+        # Log model artifact. Use cloudpickle serialization: MLflow 3.x
+        # defaults to skops, which refuses to serialize XGBoost models and
+        # the custom baseline classes unless they are explicitly whitelisted.
         model_info = log_model(
             sk_model=model,
             name="model",
             registered_model_name=model_name,
+            serialization_format="cloudpickle",
         )
 
         # Promote to champion alias (only the primary model; baselines are
@@ -449,7 +455,7 @@ def log_to_mlflow(
 def main():
     """Orchestrate training pipeline: train XGBoost + baselines, log to MLflow."""
     cfg = load_config()
-    setup_logging(cfg)
+    setup_logging(cfg, logger_name=MODULE_LOGGER_NAME)
     processed_path = cfg["data"]["processed_path"]
 
     logger.info("Stage: training")

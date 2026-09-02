@@ -27,6 +27,9 @@ models/*
 reports/*
 !reports/.gitkeep
 
+# Pipeline logs (project-local, easy to inspect during debugging)
+logs/
+
 # MLflow
 mlruns/
 mlartifacts/

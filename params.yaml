@@ -80,3 +80,4 @@ serving:
 
 logging:
   level: INFO                   # DEBUG | INFO | WARNING | ERROR
+  # file: optional override; default = logs/energy_forecast_pipeline.log (project root)
