@@ -7,6 +7,15 @@ data:
   train_end: "2023-12-31"       # everything before this is training data
   val_end:   "2024-06-30"       # validation window
   # test set = everything after val_end
+  max_gap_periods: 2            # max consecutive missing periods to impute at temporal.resolution (beyond: dropped)
+  fill_method: ffill            # imputation method: ffill | interpolate
+  add_is_imputed_flag: true     # add an is_imputed column so downstream can handle imputed rows
+  drop_long_gaps: true          # drop rows left as NaN after imputation (explicit policy)
+  entsoe:
+    bidding_zone: "PSE"
+    start_date: "2018-01-01"
+    include_load: true            # also download actual load and store as load_mw column
+    # ENTSO-E API key is read from env var ENTSOE_API_KEY
 
 temporal:
   resolution: hourly            # hourly | daily | weekly
@@ -18,13 +27,14 @@ temporal:
 features:
   calendar:
     enabled: true
-    include: [hour, day_of_week, month, week_of_year, is_holiday, is_workday]
+    include: [hour, day_of_week, month, week_of_year, is_holiday, is_workday,
+               days_to_next_holiday, days_since_last_holiday]
   weather:
     enabled: false              # toggle for ablation experiments
     variables: [temperature_2m, wind_speed_100m, shortwave_radiation, cloud_cover]
     locations: [warsaw, krakow, gdansk, wroclaw]
   lags:
-    enabled: false              # Stage 1: off; enable in Stage 2
+    enabled: true               # Stage 2: enable lag features
     periods: [1, 2, 3, 24, 48, 168]   # hours (168 = 1 week)
   derivatives:
     enabled: false              # toggle for ablation experiments
@@ -37,35 +47,36 @@ features:
     enabled: false
 
 model:
-  # Stage 1: DummyRegressor for skeleton pipeline
-  type: sklearn.dummy.DummyRegressor
+  # Stage 2: XGBoost for real model
+  type: xgboost.XGBRegressor
   params:
-    strategy: "mean"
-
-  # Stage 2+: Uncomment for real model
-  # type: xgboost.XGBRegressor
-  # params:
-  #   n_estimators: 500
-  #   max_depth: 6
-  #   learning_rate: 0.05
-  #   subsample: 0.8
-  #   colsample_bytree: 0.8
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
 
 evaluation:
   primary_metric: rmse          # used for model comparison and early stopping
-  metrics: [rmse, mae]          # Stage 1: minimal; add mape, r2 in Stage 2
+  metrics: [rmse, mae, mape, r2]   # Stage 2: full metrics
+  generate_plots: true             # generate actual-vs-predicted and residual plots
   residual_breakdown:           # which categorical variables to break residuals by
     - hour
     - day_of_week
     - month
-    # is_holiday added in Stage 2 when real holiday data is available
+    - is_holiday                   # added in Stage 2 when real holiday data is available
 
 mlflow:
   tracking_uri: http://localhost:5000
   experiment_name: energy-forecast
   model_name: energy-forecast-model   # registered model name in MLflow registry
+  promote_to_production: true   # primary model gets the champion alias; baselines never do
+  champion_alias: champion      # alias name for the deployable model
   run_tags: {}                  # filled programmatically
 
 serving:
   port: 8000
-  model_stage: Production       # MLflow model registry stage to load
+  model_alias: champion         # alias of the model registry version to load
+
+logging:
+  level: INFO                   # DEBUG | INFO | WARNING | ERROR

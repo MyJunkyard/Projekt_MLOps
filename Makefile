@@ -11,7 +11,7 @@
 # package (and its shared helpers in src/utils.py) are importable.
 # =============================================================================
 
-.PHONY: ingest featurise train evaluate serve test all up down clean
+.PHONY: ingest featurise train evaluate serve test compare all up down clean
 
 # --- Pipeline steps (run locally, need MLflow running in Docker) ---
 
@@ -37,6 +37,13 @@ down:
 
 serve:
 	docker compose --env-file secrets/.env up -d api
+
+# --- Model comparison ---
+
+compare:
+	@echo "Opening MLflow UI to compare runs..."
+	@echo "Navigate to: http://localhost:5000"
+	@docker compose exec mlflow mlflow models list || true
 
 # --- Testing ---
 

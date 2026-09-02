@@ -3,7 +3,6 @@ Unit tests for src/utils.py — load_config, compute_metrics, get_split_masks.
 """
 
 import numpy as np
-import pandas as pd
 import pytest
 import yaml
 
@@ -84,6 +83,23 @@ class TestComputeMetrics:
         y_pred = np.array([5.0, 12.0])
         result = compute_metrics(y_true, y_pred, ["mape"])
         # Only the non-zero entry contributes: |10-12|/10 * 100 = 20%
+        assert result["mape"] == pytest.approx(20.0)
+
+    def test_mape_with_negative_prices(self):
+        """Positive: MAPE works with negative prices (masks zeros only)."""
+        y_true = np.array([-10.0, 5.0, -20.0])
+        y_pred = np.array([-12.0, 6.0, -22.0])
+        result = compute_metrics(y_true, y_pred, ["mape"])
+        # |(-10)-(-12)|/|-10| = 0.2, |5-6|/|5| = 0.2, |(-20)-(-22)|/|-20| = 0.1
+        # Mean = (0.2 + 0.2 + 0.1)/3 * 100 = 16.666...
+        assert result["mape"] == pytest.approx(16.666666666666664)
+
+    def test_mape_mixed_signs(self):
+        """Positive: MAPE handles mix of positive/negative/zero correctly."""
+        y_true = np.array([0.0, 10.0, -5.0])
+        y_pred = np.array([1.0, 12.0, -6.0])
+        result = compute_metrics(y_true, y_pred, ["mape"])
+        # Zero masked: |10-12|/10 = 20%, |-5-(-6)|/|-5| = 20% → mean = 20%
         assert result["mape"] == pytest.approx(20.0)
 
 

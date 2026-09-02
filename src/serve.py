@@ -18,14 +18,13 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from src.utils import load_config
+from src.utils import load_config, setup_logging
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 # Global config and model (loaded at startup)
 cfg = load_config()
+setup_logging(cfg)
 model = None
 model_version = "unknown"
 
@@ -59,50 +58,57 @@ async def lifespan(app: FastAPI):
         None. Control is yielded to the application while it runs.
     """
     global model, model_version, cfg
-    logger.info("Loading model from MLflow registry...")
+    logger.info("Loading model from MLflow registry")
 
-    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI") or cfg["mlflow"]["tracking_uri"]
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI") or cfg["mlflow"][
+        "tracking_uri"
+    ]
     mlflow.set_tracking_uri(tracking_uri)
-    logger.info(f"MLflow tracking URI: {tracking_uri}")
+    logger.debug("MLflow tracking URI: %s", tracking_uri)
 
     # Retry with backoff so a briefly-unavailable MLflow server (e.g. during
     # container startup) doesn't leave the API permanently without a model.
     model_name = cfg["mlflow"]["model_name"]
+    alias = cfg["serving"]["model_alias"]
     max_attempts = 5
     delay_seconds = 2
     for attempt in range(1, max_attempts + 1):
         try:
-            model_uri = f"models:/{model_name}/{cfg['serving']['model_stage']}"
+            model_uri = f"models:/{model_name}@{alias}"
             model = mlflow.pyfunc.load_model(model_uri)
 
-            # Get model version from MLflow registry
+            # Get model version from MLflow registry (alias points to
+            # exactly one version, so the lookup is unambiguous)
             client = mlflow.MlflowClient()
-            latest_version = client.get_latest_versions(
-                model_name, stages=[cfg["serving"]["model_stage"]]
-            )
-            if latest_version:
-                model_version = latest_version[0].version
-            logger.info(f"Model loaded successfully (version: {model_version})")
+            version_info = client.get_model_version_by_alias(model_name, alias)
+            model_version = version_info.version
+            logger.info("Model loaded successfully (version: %s)", model_version)
             break
         except Exception as e:
             if attempt < max_attempts:
                 logger.warning(
-                    f"Model load attempt {attempt}/{max_attempts} failed: {e}. "
-                    f"Retrying in {delay_seconds}s..."
+                    "Model load attempt %d/%d failed: %s. Retrying in %ds...",
+                    attempt,
+                    max_attempts,
+                    e,
+                    delay_seconds,
                 )
                 time.sleep(delay_seconds)
             else:
                 logger.error(
-                    f"Could not load model after {max_attempts} attempts: {e}"
+                    "Could not load model after %d attempts: %s",
+                    max_attempts,
+                    e,
                 )
                 logger.warning(
-                    "API will start but /predict will return 503 until model is available."
+                    "API will start but /predict will return 503 until "
+                    "model is available"
                 )
 
     yield
 
     # Cleanup (if needed)
-    logger.info("Shutting down API.")
+    logger.info("Shutting down API")
 
 
 app = FastAPI(
@@ -145,11 +151,13 @@ async def predict(request: PredictRequest):
     if model is None:
         raise HTTPException(
             status_code=503,
-            detail="Model not loaded. Ensure MLflow is running and a model is registered.",
+            detail="Model not loaded. Ensure MLflow is running and a model "
+            "is registered.",
         )
 
     # Convert to DataFrame
     df = pd.DataFrame(request.features)
+    logger.debug("Received prediction request with %d row(s)", len(df))
     predictions = model.predict(df)
 
     return PredictResponse(predictions=predictions.tolist())

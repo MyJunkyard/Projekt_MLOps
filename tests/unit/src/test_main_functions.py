@@ -9,7 +9,6 @@ from unittest import mock
 
 import numpy as np
 import pandas as pd
-import pytest
 
 import src.evaluate as evaluate_mod
 import src.featurise as featurise_mod
@@ -27,10 +26,12 @@ class TestIngestMain:
         with mock.patch("src.ingest.generate_synthetic_data", return_value=sample_df):
             ingest_mod.main()
 
-        out = raw_dir / "synthetic.csv"
+        out = raw_dir / "entsoe_prices.csv"
         assert out.exists()
         loaded = pd.read_csv(out, parse_dates=["timestamp"])
         assert len(loaded) == len(sample_df)
+        # Manifest is also written
+        assert (raw_dir / "manifest.json").exists()
 
 
 class TestFeaturiseMain:
@@ -39,7 +40,7 @@ class TestFeaturiseMain:
         """Positive: featurise.main() loads, featurises, splits, and saves."""
         raw_dir = tmp_path / "raw"
         raw_dir.mkdir(parents=True, exist_ok=True)
-        sample_df.to_csv(raw_dir / "synthetic.csv", index=False)
+        sample_df.to_csv(raw_dir / "entsoe_prices.csv", index=False)
 
         processed = tmp_path / "processed" / "features.parquet"
         reference = tmp_path / "reference" / "reference.parquet"
@@ -49,12 +50,14 @@ class TestFeaturiseMain:
                 "raw_path": str(raw_dir) + "/",
                 "processed_path": str(processed),
                 "reference_path": str(reference),
+                "target_col": "price_eur_mwh",
                 "train_end": "2023-12-31",
                 "val_end": "2024-01-01",
             },
             "features": {
                 "calendar": {"enabled": True},
                 "lags": {"enabled": True, "periods": [1, 2, 24]},
+                "derivatives": {"enabled": False, "order": [1, 2], "smooth_window": 3},
             },
         }
 
@@ -70,12 +73,16 @@ class TestFeaturiseMain:
 class TestTrainMain:
     @mock.patch("src.train.log_to_mlflow")
     @mock.patch("src.train.load_config")
-    def test_main_trains_and_logs(self, mock_load_config, mock_log, tmp_path, sample_config):
+    def test_main_trains_and_logs(
+        self, mock_load_config, mock_log, tmp_path, sample_config
+    ):
         """Positive: train.main() loads features, trains, and logs to MLflow."""
         processed = tmp_path / "features.parquet"
         sample_df = pd.DataFrame(
             {
-                "timestamp": pd.date_range("2023-12-30", periods=72, freq="h", tz="UTC"),
+                "timestamp": pd.date_range(
+                    "2023-12-30", periods=72, freq="h", tz="UTC"
+                ),
                 "price_eur_mwh": np.linspace(40, 60, 72),
                 "hour": list(range(24)) * 3,
             }
@@ -90,21 +97,33 @@ class TestTrainMain:
 
         train_mod.main()
 
-        mock_log.assert_called_once()
+        # Stage 2: three runs — XGBoost + persistence + seasonal naive
+        assert mock_log.call_count == 3
         args, _ = mock_log.call_args
-        assert args[0].__class__.__name__ == "DummyRegressor"
         assert "rmse" in args[1]
+        run_names = [call[1].get("run_name") for call in mock_log.call_args_list]
+        assert run_names == [
+            "xgboost-v1",
+            "baseline-persistence",
+            "baseline-seasonal-naive",
+        ]
 
 
 class TestEvaluateMain:
+    @mock.patch("src.evaluate.log_evaluation_results")
     @mock.patch("src.evaluate.load_model_from_registry")
     @mock.patch("src.evaluate.load_config")
-    def test_main_evaluates(self, mock_load_config, mock_load_model, tmp_path, sample_config):
+    def test_main_evaluates(
+        self, mock_load_config, mock_load_model, mock_log_results,
+        tmp_path, sample_config
+    ):
         """Positive: evaluate.main() loads test features and prints metrics."""
         processed = tmp_path / "features.parquet"
         sample_df = pd.DataFrame(
             {
-                "timestamp": pd.date_range("2023-12-30", periods=72, freq="h", tz="UTC"),
+                "timestamp": pd.date_range(
+                    "2023-12-30", periods=72, freq="h", tz="UTC"
+                ),
                 "price_eur_mwh": np.linspace(40, 60, 72),
                 "hour": list(range(24)) * 3,
             }
@@ -123,3 +142,6 @@ class TestEvaluateMain:
         evaluate_mod.main()
 
         mock_model.predict.assert_called_once()
+        # Results are logged via log_evaluation_results (mocked — no real
+        # MLflow HTTP calls, which would hang without a running server)
+        mock_log_results.assert_called_once()
