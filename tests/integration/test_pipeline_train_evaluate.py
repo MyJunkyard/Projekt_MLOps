@@ -1,21 +1,20 @@
 """
 Integration tests — features.parquet → train → evaluate flow.
 
-Exercises the interaction between src.train and src.evaluate using
-temporary files and mocked MLflow (no live MLflow server).
+Exercises the interaction between the training and evaluation packages
+using temporary files and mocked MLflow (no live MLflow server).
 """
 
 from unittest import mock
 
 import numpy as np
 
-from src.evaluate import load_test_features
-from src.train import (
-    load_features,
-    load_model,
+from src.evaluation.reporting import load_test_features
+from src.training.baselines import (
     train_baseline_persistence,
     train_baseline_seasonal_naive,
 )
+from src.training.loader import load_features, load_model
 
 
 class TestTrainEvaluateFlow:
@@ -52,8 +51,8 @@ class TestTrainEvaluateFlow:
         np.testing.assert_array_equal(X_test_train, X_test_eval)
         np.testing.assert_array_equal(y_test_train, y_test_eval)
 
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_log_to_mlflow_integration(
         self, mock_mlflow, mock_log_model, features_parquet_path, sample_config
     ):
@@ -64,7 +63,7 @@ class TestTrainEvaluateFlow:
         mock_mlflow.MlflowClient.return_value = mock.MagicMock()
         mock_log_model.return_value = mock.MagicMock(registered_model_version=None)
 
-        from src.train import log_to_mlflow
+        from src.training.registry import log_to_mlflow
 
         X_train, y_train, X_val, y_val, _, _ = load_features(
             features_parquet_path, sample_config
@@ -73,7 +72,7 @@ class TestTrainEvaluateFlow:
         model.fit(X_train, y_train)
         y_pred = model.predict(X_val)
 
-        from src.utils import compute_metrics
+        from src.common.metrics import compute_metrics
 
         metrics = compute_metrics(y_val, y_pred, sample_config["evaluation"]["metrics"])
         run_id = log_to_mlflow(model, metrics, sample_config)
@@ -94,7 +93,7 @@ class TestXGBoostVsBaselines:
         model.fit(X_train, y_train)
         y_pred_xgb = model.predict(X_val)
 
-        from src.utils import compute_metrics
+        from src.common.metrics import compute_metrics
 
         xgb_metrics = compute_metrics(y_val, y_pred_xgb, ["rmse", "mae"])
         assert np.isfinite(xgb_metrics["rmse"])
@@ -118,8 +117,8 @@ class TestXGBoostVsBaselines:
         assert np.isfinite(persistence_metrics["rmse"])
         assert np.isfinite(seasonal_metrics["rmse"])
 
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_feature_importances_logged(
         self, mock_mlflow, mock_log_model, features_parquet_path, sample_config_stage2
     ):
@@ -130,7 +129,8 @@ class TestXGBoostVsBaselines:
         mock_mlflow.MlflowClient.return_value = mock.MagicMock()
         mock_log_model.return_value = mock.MagicMock(registered_model_version=None)
 
-        from src.train import get_feature_names, log_to_mlflow
+        from src.training.loader import get_feature_names
+        from src.training.registry import log_to_mlflow
 
         X_train, y_train, X_val, y_val, _, _ = load_features(
             features_parquet_path, sample_config_stage2
@@ -141,7 +141,7 @@ class TestXGBoostVsBaselines:
         model.fit(X_train, y_train)
         y_pred = model.predict(X_val)
 
-        from src.utils import compute_metrics
+        from src.common.metrics import compute_metrics
 
         metrics = compute_metrics(
             y_val, y_pred, sample_config_stage2["evaluation"]["metrics"]
@@ -153,15 +153,15 @@ class TestXGBoostVsBaselines:
 
 
 class TestOnlyPrimaryModelPromoted:
-    @mock.patch("src.train.load_config")
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.main.load_config")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_only_primary_model_promoted(
         self, mock_mlflow, mock_log_model, mock_load_config,
         features_parquet_path, sample_config_stage2,
     ):
         """Positive: main() sets the champion alias exactly once (xgboost only)."""
-        from src.train import main as train_main
+        from src.training.main import main as train_main
 
         mock_load_config.return_value = sample_config_stage2
         mock_run = mock.MagicMock()

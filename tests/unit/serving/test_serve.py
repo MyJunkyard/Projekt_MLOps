@@ -1,5 +1,5 @@
 """
-Unit tests for src/serve.py — FastAPI /health and /predict endpoints.
+Unit tests for the serving package — FastAPI /health and /predict endpoints.
 """
 
 from unittest import mock
@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-import src.serve as serve
+import src.serving.app as serve
 
 
 @pytest.fixture

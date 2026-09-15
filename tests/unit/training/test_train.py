@@ -1,6 +1,6 @@
 """
-Unit tests for src/train.py — model loading, feature loading, git hash, MLflow logging,
-baselines, params hash, feature importances.
+Unit tests for the training package — model loading, feature loading, git hash,
+MLflow logging, baselines, params hash, feature importances.
 """
 
 import copy
@@ -11,19 +11,20 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.train import (
+from src.common.hashing import compute_params_hash
+from src.training.baselines import (
     PersistenceModel,
     SeasonalNaiveModel,
-    compute_params_hash,
+    train_baseline_persistence,
+    train_baseline_seasonal_naive,
+)
+from src.training.loader import (
     get_feature_names,
     get_git_commit_hash,
     load_features,
     load_model,
-    log_feature_importances,
-    log_to_mlflow,
-    train_baseline_persistence,
-    train_baseline_seasonal_naive,
 )
+from src.training.registry import log_feature_importances, log_to_mlflow
 
 
 class TestLoadModel:
@@ -103,13 +104,16 @@ class TestGetGitCommitHash:
         assert isinstance(result, str)
         assert len(result) > 0
 
-    @mock.patch("src.train.subprocess.run", side_effect=FileNotFoundError)
+    @mock.patch(
+        "src.training.loader.subprocess.run", side_effect=FileNotFoundError
+    )
     def test_returns_unknown_when_not_git(self, mock_run):
         """Negative: returns 'unknown' when git is unavailable."""
         assert get_git_commit_hash() == "unknown"
 
     @mock.patch(
-        "src.train.subprocess.run", side_effect=subprocess.CalledProcessError(1, "git")
+        "src.training.loader.subprocess.run",
+        side_effect=subprocess.CalledProcessError(1, "git"),
     )
     def test_returns_unknown_on_error(self, mock_run):
         """Negative: returns 'unknown' when git command fails."""
@@ -131,7 +135,7 @@ class TestComputeParamsHash:
 
 
 class TestLogFeatureImportances:
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.mlflow")
     def test_logs_json_artifact(self, mock_mlflow):
         """Positive: logs feature importances as JSON artifact."""
         model = mock.MagicMock()
@@ -145,7 +149,7 @@ class TestLogFeatureImportances:
         assert args[0].endswith(".json")
         assert kwargs == {"artifact_path": "feature_importances"}
 
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.mlflow")
     def test_handles_no_importances(self, mock_mlflow):
         """Negative: model without feature importances is handled gracefully."""
 
@@ -157,7 +161,7 @@ class TestLogFeatureImportances:
         log_feature_importances(model, ["f1", "f2"])
         mock_mlflow.log_artifact.assert_not_called()
 
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.mlflow")
     def test_empty_importances_skipped(self, mock_mlflow):
         """Negative: empty importances array is not logged."""
         model = mock.MagicMock()
@@ -253,8 +257,8 @@ class TestTrainBaselineSeasonalNaive:
 
 
 class TestLogToMlflow:
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_returns_run_id(self, mock_mlflow, mock_log_model, sample_config):
         """Positive: returns run_id from started run."""
         mock_run = mock.MagicMock()
@@ -267,8 +271,8 @@ class TestLogToMlflow:
         run_id = log_to_mlflow(model, {"rmse": 1.0}, sample_config)
         assert run_id == "test-run-id"
 
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_logs_params_and_metrics(self, mock_mlflow, mock_log_model, sample_config):
         """Positive: logs model params, metrics, and tags."""
         mock_run = mock.MagicMock()
@@ -285,9 +289,11 @@ class TestLogToMlflow:
         mock_mlflow.log_metric.assert_any_call("mae", 0.5)
         mock_mlflow.set_tag.assert_any_call("stage", "2")
 
-    @mock.patch("src.train.compute_params_hash", return_value="abc123")
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch(
+        "src.training.registry.compute_params_hash", return_value="abc123"
+    )
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_logs_params_hash(
         self, mock_mlflow, mock_log_model, mock_params_hash, sample_config
     ):
@@ -301,8 +307,8 @@ class TestLogToMlflow:
         log_to_mlflow(mock.MagicMock(), {"rmse": 1.0}, sample_config)
         mock_mlflow.set_tag.assert_any_call("params_hash", "abc123")
 
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_logs_params_yaml_artifact(
         self, mock_mlflow, mock_log_model, sample_config
     ):
@@ -320,8 +326,8 @@ class TestLogToMlflow:
 class TestLogToMlflowPromotion:
     """Promotion via champion alias: only the primary model is promoted."""
 
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_promotes_when_flag_set(
         self, mock_mlflow, mock_log_model, sample_config
     ):
@@ -342,8 +348,8 @@ class TestLogToMlflowPromotion:
                 version="3",
             )
 
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_baseline_not_promoted(self, mock_mlflow, mock_log_model, sample_config):
         """Negative: default (no flag) never sets the alias, even when registered."""
         mock_run = mock.MagicMock()
@@ -356,8 +362,8 @@ class TestLogToMlflowPromotion:
         mock_mlflow.MlflowClient.return_value.set_registered_model_alias.\
             assert_not_called()
 
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_config_gate_disables_promotion(
         self, mock_mlflow, mock_log_model, sample_config
     ):
@@ -376,8 +382,8 @@ class TestLogToMlflowPromotion:
         mock_mlflow.MlflowClient.return_value.set_registered_model_alias.\
             assert_not_called()
 
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_config_gate_missing_defaults_to_promote(
         self, mock_mlflow, mock_log_model, sample_config
     ):
@@ -396,8 +402,8 @@ class TestLogToMlflowPromotion:
         mock_mlflow.MlflowClient.return_value.set_registered_model_alias.\
             assert_called_once()
 
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_unregistered_model_skips_transition(
         self, mock_mlflow, mock_log_model, sample_config
     ):
@@ -414,8 +420,8 @@ class TestLogToMlflowPromotion:
         mock_mlflow.MlflowClient.return_value.set_registered_model_alias.\
             assert_not_called()
 
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_custom_alias_from_config(
         self, mock_mlflow, mock_log_model, sample_config
     ):
@@ -438,8 +444,8 @@ class TestLogToMlflowPromotion:
                 version="7",
             )
 
-    @mock.patch("src.train.log_model")
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
     def test_promotion_logged(
         self, mock_mlflow, mock_log_model, sample_config, caplog
     ):
@@ -449,7 +455,7 @@ class TestLogToMlflowPromotion:
         mock_mlflow.start_run.return_value.__enter__.return_value = mock_run
         mock_log_model.return_value = mock.MagicMock(registered_model_version="8")
 
-        with caplog.at_level("INFO", logger="src.train"):
+        with caplog.at_level("INFO", logger="src.training.registry"):
             log_to_mlflow(
                 mock.MagicMock(),
                 {"rmse": 1.0},

@@ -1,19 +1,20 @@
 """
-Unit tests for src/featurise.py — feature engineering and splitting.
+Unit tests for the features package — feature engineering and splitting.
 """
 
-from numpy import isnan
 import pandas as pd
 import pytest
+from numpy import isnan
 
-from src.featurise import (
+from src.features.calendar import (
     _get_holiday_dates,
     add_calendar_features,
-    add_derivative_features,
     add_holiday_features,
     add_holiday_proximity_features,
-    add_lag_features,
-    add_rolling_features,
+)
+from src.features.derivatives import add_derivative_features
+from src.features.lags import add_lag_features, add_rolling_features
+from src.features.main import (
     load_raw_data,
     save_processed_data,
     train_val_test_split,

@@ -1,6 +1,6 @@
 """
-Unit tests for src/evaluate.py — test feature loading, results table,
-plots, residual breakdown, and MLflow result logging.
+Unit tests for the evaluation package — test feature loading, results
+table, plots, residual breakdown, and MLflow result logging.
 """
 
 import logging
@@ -10,13 +10,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.evaluate import (
+from src.evaluation.plots import plot_actual_vs_predicted, residual_breakdown
+from src.evaluation.reporting import (
     get_model_run_id,
     load_test_features,
     log_evaluation_results,
     log_results_table,
-    plot_actual_vs_predicted,
-    residual_breakdown,
 )
 
 
@@ -36,7 +35,7 @@ class TestLoadTestFeatures:
 class TestLogResultsTable:
     def test_logs_metrics(self, caplog):
         """Positive: logs metrics at INFO level."""
-        with caplog.at_level(logging.INFO, logger="src.evaluate"):
+        with caplog.at_level(logging.INFO, logger="src.evaluation.reporting"):
             log_results_table({"rmse": 1.2345, "mae": 0.9876})
         assert "Test rmse: 1.2345" in caplog.text
         assert "Test mae: 0.9876" in caplog.text
@@ -122,7 +121,7 @@ class TestResidualBreakdown:
 
 
 class TestGetModelRunId:
-    @mock.patch("src.evaluate.mlflow")
+    @mock.patch("src.evaluation.reporting.mlflow")
     def test_returns_run_id_from_alias(self, mock_mlflow, sample_config):
         """Positive: resolves the training run ID from the champion alias."""
         mock_client = mock_mlflow.MlflowClient.return_value
@@ -136,7 +135,7 @@ class TestGetModelRunId:
             sample_config["serving"]["model_alias"],
         )
 
-    @mock.patch("src.evaluate.mlflow")
+    @mock.patch("src.evaluation.reporting.mlflow")
     def test_returns_none_on_registry_error(self, mock_mlflow, sample_config):
         """Negative: registry failure returns None instead of raising."""
         mock_mlflow.MlflowClient.return_value.get_model_version_by_alias.\
@@ -146,8 +145,10 @@ class TestGetModelRunId:
 
 
 class TestLogEvaluationResults:
-    @mock.patch("src.evaluate.get_model_run_id", return_value="train-run-1")
-    @mock.patch("src.evaluate.mlflow")
+    @mock.patch(
+        "src.evaluation.reporting.get_model_run_id", return_value="train-run-1"
+    )
+    @mock.patch("src.evaluation.reporting.mlflow")
     def test_logs_to_training_run(self, mock_mlflow, mock_run_id, sample_config):
         """Positive: metrics and artifacts go to the training run."""
         log_evaluation_results(
@@ -159,8 +160,10 @@ class TestLogEvaluationResults:
         logged = [call[0][0] for call in mock_mlflow.log_artifact.call_args_list]
         assert logged == ["plot.png", "breakdown.csv"]
 
-    @mock.patch("src.evaluate.get_model_run_id", return_value=None)
-    @mock.patch("src.evaluate.mlflow")
+    @mock.patch(
+        "src.evaluation.reporting.get_model_run_id", return_value=None
+    )
+    @mock.patch("src.evaluation.reporting.mlflow")
     def test_falls_back_to_named_run(self, mock_mlflow, mock_run_id, sample_config):
         """Negative: unresolved training run falls back to a named run."""
         log_evaluation_results(sample_config, {"rmse": 1.0}, [])
@@ -169,8 +172,10 @@ class TestLogEvaluationResults:
         mock_mlflow.log_metric.assert_any_call("rmse", 1.0)
         mock_mlflow.log_artifact.assert_not_called()
 
-    @mock.patch("src.evaluate.get_model_run_id", return_value="train-run-1")
-    @mock.patch("src.evaluate.mlflow")
+    @mock.patch(
+        "src.evaluation.reporting.get_model_run_id", return_value="train-run-1"
+    )
+    @mock.patch("src.evaluation.reporting.mlflow")
     def test_empty_artifacts_ok(self, mock_mlflow, mock_run_id, sample_config):
         """Positive: empty artifact list logs metrics only."""
         log_evaluation_results(sample_config, {"rmse": 1.0, "mae": 0.5}, [])

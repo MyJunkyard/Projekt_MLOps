@@ -9,21 +9,22 @@ from unittest import mock
 
 import numpy as np
 
-from src.featurise import (
-    _get_holiday_dates,
-    add_calendar_features,
-    add_lag_features,
+from src.common.metrics import compute_metrics
+from src.features.calendar import _get_holiday_dates, add_calendar_features
+from src.features.lags import add_lag_features
+from src.features.main import (
     load_raw_data,
     save_processed_data,
     train_val_test_split,
 )
-from src.ingest import generate_synthetic_data, save_raw_data, validate_schema
-from src.train import load_features, load_model
-from src.utils import compute_metrics
+from src.ingestion.entsoe import generate_synthetic_data
+from src.ingestion.manifest import save_raw_data
+from src.ingestion.validation import validate_schema
+from src.training.loader import load_features, load_model
 
 
 class TestEndToEndPipeline:
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.mlflow")
     def test_full_pipeline_smoke(self, mock_mlflow, tmp_path, sample_config):
         """Positive: full pipeline runs end-to-end and produces valid outputs."""
         # generate_synthetic_data starts at 2020-01-01; align split dates to it
@@ -75,7 +76,7 @@ class TestEndToEndPipeline:
         # Model is a fitted DummyRegressor predicting the mean
         assert np.allclose(y_pred, y_train.mean(), atol=1e-6)
 
-    @mock.patch("src.train.mlflow")
+    @mock.patch("src.training.registry.mlflow")
     def test_full_pipeline_with_xgboost(
         self, mock_mlflow, tmp_path, sample_config_stage2
     ):

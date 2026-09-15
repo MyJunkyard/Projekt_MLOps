@@ -1,6 +1,6 @@
 """
-Unit tests for src/utils.py — load_config, compute_metrics, get_split_masks,
-and setup_logging.
+Unit tests for the common package and config — setup_logging,
+compute_metrics, get_split_masks, and load_config.
 """
 
 import logging
@@ -11,13 +11,10 @@ import numpy as np
 import pytest
 import yaml
 
-from src.utils import (
-    DEFAULT_LOG_FILE,
-    compute_metrics,
-    get_split_masks,
-    load_config,
-    setup_logging,
-)
+from src.common.logsetup import DEFAULT_LOG_FILE, setup_logging
+from src.common.metrics import compute_metrics
+from src.common.splits import get_split_masks
+from src.config import load_config
 
 
 # ---------------------------------------------------------------------------

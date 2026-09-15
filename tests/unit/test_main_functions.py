@@ -10,20 +10,22 @@ from unittest import mock
 import numpy as np
 import pandas as pd
 
-import src.evaluate as evaluate_mod
-import src.featurise as featurise_mod
-import src.ingest as ingest_mod
-import src.train as train_mod
+import src.evaluation.main as evaluate_mod
+import src.features.main as featurise_mod
+import src.ingestion.main as ingest_mod
+import src.training.main as train_mod
 
 
 class TestIngestMain:
-    @mock.patch("src.ingest.load_config")
+    @mock.patch("src.ingestion.main.load_config")
     def test_main_runs_pipeline(self, mock_load_config, tmp_path, sample_df):
         """Positive: ingest.main() generates, validates, and saves data."""
         raw_dir = tmp_path / "raw"
         mock_load_config.return_value = {"data": {"raw_path": str(raw_dir) + "/"}}
 
-        with mock.patch("src.ingest.generate_synthetic_data", return_value=sample_df):
+        with mock.patch(
+            "src.ingestion.main.generate_synthetic_data", return_value=sample_df
+        ):
             ingest_mod.main()
 
         out = raw_dir / "entsoe_prices.csv"
@@ -35,7 +37,7 @@ class TestIngestMain:
 
 
 class TestFeaturiseMain:
-    @mock.patch("src.featurise.load_config")
+    @mock.patch("src.features.main.load_config")
     def test_main_runs_pipeline(self, mock_load_config, tmp_path, sample_df):
         """Positive: featurise.main() loads, featurises, splits, and saves."""
         raw_dir = tmp_path / "raw"
@@ -71,8 +73,8 @@ class TestFeaturiseMain:
 
 
 class TestTrainMain:
-    @mock.patch("src.train.log_to_mlflow")
-    @mock.patch("src.train.load_config")
+    @mock.patch("src.training.main.log_to_mlflow")
+    @mock.patch("src.training.main.load_config")
     def test_main_trains_and_logs(
         self, mock_load_config, mock_log, tmp_path, sample_config
     ):
@@ -110,9 +112,9 @@ class TestTrainMain:
 
 
 class TestEvaluateMain:
-    @mock.patch("src.evaluate.log_evaluation_results")
-    @mock.patch("src.evaluate.load_model_from_registry")
-    @mock.patch("src.evaluate.load_config")
+    @mock.patch("src.evaluation.main.log_evaluation_results")
+    @mock.patch("src.evaluation.main.load_model_from_registry")
+    @mock.patch("src.evaluation.main.load_config")
     def test_main_evaluates(
         self, mock_load_config, mock_load_model, mock_log_results,
         tmp_path, sample_config

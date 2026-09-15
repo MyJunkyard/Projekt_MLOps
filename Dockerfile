@@ -14,4 +14,4 @@ COPY params.yaml .
 EXPOSE 8000
 
 # Run FastAPI with uvicorn
-CMD ["uvicorn", "src.serve:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.serving.app:app", "--host", "0.0.0.0", "--port", "8000"]

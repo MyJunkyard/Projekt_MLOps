@@ -1,31 +1,29 @@
 """
 Integration tests — raw CSV → features.parquet flow.
 
-Exercises the interaction between src.ingest and src.featurise using
-temporary files and in-memory config (no real data or params.yaml).
+Exercises the interaction between the ingestion and features packages
+using temporary files and in-memory config (no real data or params.yaml).
 """
 
 from unittest import mock
 
 import pandas as pd
 
-from src.featurise import (
+from src.features.calendar import (
     _get_holiday_dates,
     add_calendar_features,
     add_holiday_features,
     add_holiday_proximity_features,
-    add_lag_features,
-    add_rolling_features,
+)
+from src.features.lags import add_lag_features, add_rolling_features
+from src.features.main import (
     load_raw_data,
     save_processed_data,
     train_val_test_split,
 )
-from src.ingest import (
-    download_entsoe_data,
-    generate_synthetic_data,
-    save_raw_data,
-    validate_schema,
-)
+from src.ingestion.entsoe import download_entsoe_data, generate_synthetic_data
+from src.ingestion.manifest import save_raw_data
+from src.ingestion.validation import validate_schema
 
 
 class TestIngestToFeaturise:
@@ -91,7 +89,7 @@ class TestIngestToFeaturise:
 
 class TestEntsoeToFeaturise:
     @mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}, clear=False)
-    @mock.patch("src.ingest.EntsoeClient")
+    @mock.patch("src.ingestion.entsoe.EntsoeClient")
     def test_full_entsoe_featurise_flow(
         self, mock_client_class, tmp_path, sample_config_stage2
     ):

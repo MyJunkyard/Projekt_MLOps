@@ -1,7 +1,8 @@
 """
-Unit tests for src/ingest.py — generate_synthetic_data, validate_schema,
-save_raw_data, download_entsoe_data, validate_entsoe_data,
-reindex_to_grid, forward_fill_gaps, write_manifest.
+Unit tests for the ingestion package — generate_synthetic_data,
+validate_schema, save_raw_data, download_entsoe_data,
+validate_entsoe_data, reindex_to_grid, forward_fill_gaps, write_manifest,
+and the ingest main() orchestration.
 """
 
 import hashlib
@@ -14,17 +15,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.ingest import (
-    download_entsoe_data,
+from src.ingestion.entsoe import download_entsoe_data, generate_synthetic_data
+from src.ingestion.main import main
+from src.ingestion.manifest import save_raw_data, write_manifest
+from src.ingestion.validation import (
     fill_gaps,
     forward_fill_gaps,
-    generate_synthetic_data,
-    main,
     reindex_to_grid,
-    save_raw_data,
     validate_entsoe_data,
     validate_schema,
-    write_manifest,
 )
 
 
@@ -173,7 +172,7 @@ class TestSaveRawData:
     def test_logs_summary(self, tmp_path, sample_df, caplog):
         """Positive: logs summary including the saved path, rows, and SHA256."""
         out = tmp_path / "raw.csv"
-        with caplog.at_level(logging.INFO, logger="src.ingest"):
+        with caplog.at_level(logging.INFO, logger="src.ingestion.manifest"):
             save_raw_data(sample_df, str(out))
         assert "Saved" in caplog.text
         assert "rows" in caplog.text
@@ -189,7 +188,7 @@ class TestSaveRawData:
     def test_logged_sha256_matches_file(self, tmp_path, sample_df, caplog):
         """Positive: logged SHA256 matches the on-disk file hash."""
         out = tmp_path / "raw.csv"
-        with caplog.at_level(logging.INFO, logger="src.ingest"):
+        with caplog.at_level(logging.INFO, logger="src.ingestion.manifest"):
             save_raw_data(sample_df, str(out))
         logged = next(
             record.getMessage().split("SHA256: ")[1]
@@ -205,7 +204,7 @@ class TestSaveRawData:
 # ---------------------------------------------------------------------------
 class TestDownloadEntsoeData:
     @mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}, clear=False)
-    @mock.patch("src.ingest.EntsoeClient")
+    @mock.patch("src.ingestion.entsoe.EntsoeClient")
     def test_download_returns_dataframe(self, mock_client_class, sample_config_stage2):
         """Positive: returns a DataFrame with expected columns."""
         mock_client = mock.MagicMock()
@@ -226,7 +225,7 @@ class TestDownloadEntsoeData:
         assert df["load_mw"].notna().all()
 
     @mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}, clear=False)
-    @mock.patch("src.ingest.EntsoeClient")
+    @mock.patch("src.ingestion.entsoe.EntsoeClient")
     def test_download_load_disabled_skips_query(
         self, mock_client_class, sample_config_stage2
     ):
@@ -253,7 +252,7 @@ class TestDownloadEntsoeData:
         assert len(df) == 24
 
     @mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}, clear=False)
-    @mock.patch("src.ingest.EntsoeClient")
+    @mock.patch("src.ingestion.entsoe.EntsoeClient")
     def test_download_normalizes_dataframe_load_return(
         self, mock_client_class, sample_config_stage2
     ):
@@ -279,7 +278,7 @@ class TestDownloadEntsoeData:
         assert df["load_mw"].notna().all()
 
     @mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}, clear=False)
-    @mock.patch("src.ingest.EntsoeClient")
+    @mock.patch("src.ingestion.entsoe.EntsoeClient")
     def test_download_uses_bidding_zone_from_config(
         self, mock_client_class, sample_config_stage2
     ):
@@ -737,8 +736,8 @@ class TestMainEmptyDataGuard:
              "price_eur_mwh": pd.Series(dtype=float)}
         )
 
-    @mock.patch("src.ingest.download_entsoe_data")
-    @mock.patch("src.ingest.load_config")
+    @mock.patch("src.ingestion.main.download_entsoe_data")
+    @mock.patch("src.ingestion.main.load_config")
     def test_main_raises_on_empty_dataframe(
         self, mock_load_config, mock_download, tmp_path
     ):
@@ -749,9 +748,9 @@ class TestMainEmptyDataGuard:
         with pytest.raises(ValueError, match="empty DataFrame"):
             main()
 
-    @mock.patch("src.ingest.validate_entsoe_data")
-    @mock.patch("src.ingest.download_entsoe_data")
-    @mock.patch("src.ingest.load_config")
+    @mock.patch("src.ingestion.main.validate_entsoe_data")
+    @mock.patch("src.ingestion.main.download_entsoe_data")
+    @mock.patch("src.ingestion.main.load_config")
     def test_main_raises_before_validation(
         self, mock_load_config, mock_download, mock_validate, tmp_path
     ):
@@ -767,8 +766,8 @@ class TestMainEmptyDataGuard:
             main()
         mock_validate.assert_not_called()
 
-    @mock.patch("src.ingest.download_entsoe_data")
-    @mock.patch("src.ingest.load_config")
+    @mock.patch("src.ingestion.main.download_entsoe_data")
+    @mock.patch("src.ingestion.main.load_config")
     def test_main_proceeds_with_non_empty_data(
         self, mock_load_config, mock_download, tmp_path
     ):
@@ -804,8 +803,8 @@ class TestMainResolutionGrid:
     point 7).
     """
 
-    @mock.patch("src.ingest.download_entsoe_data")
-    @mock.patch("src.ingest.load_config")
+    @mock.patch("src.ingestion.main.download_entsoe_data")
+    @mock.patch("src.ingestion.main.load_config")
     def test_main_daily_resolution_no_hourly_fabrication(
         self, mock_load_config, mock_download, tmp_path
     ):
@@ -860,8 +859,8 @@ class TestMainHashProvenance:
     needs to verify the printed hash against the manifest.
     """
 
-    @mock.patch("src.ingest.download_entsoe_data")
-    @mock.patch("src.ingest.load_config")
+    @mock.patch("src.ingestion.main.download_entsoe_data")
+    @mock.patch("src.ingestion.main.load_config")
     def test_main_manifest_sha256_matches_saved_csv_and_log(
         self, mock_load_config, mock_download, tmp_path, caplog
     ):
@@ -887,7 +886,7 @@ class TestMainHashProvenance:
         }
         mock_download.return_value = generate_synthetic_data(n_hours=48)
 
-        with caplog.at_level(logging.INFO, logger="src.ingest"):
+        with caplog.at_level(logging.INFO, logger="src.ingestion.main"):
             main()
 
         output_csv = tmp_path / "raw" / "entsoe_prices.csv"

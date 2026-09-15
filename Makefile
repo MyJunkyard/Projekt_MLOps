@@ -9,8 +9,11 @@
 #   - Docker Compose running (run `make up` first)
 #   - Python .venv activated for local commands
 #
-# NOTE: modules are run via `python -m src.<module>` so that the `src`
-# package (and its shared helpers in src/utils.py) are importable.
+# NOTE: pipeline stages are invoked via the single CLI entry point
+# `python -m src <command>` (src/cli.py), so the `src` package and its
+# role-based subpackages (common/, ingestion/, features/, training/,
+# evaluation/) are importable. Stage 5's Airflow DAG adopts the same
+# commands.
 # =============================================================================
 
 .PHONY: ingest featurise train evaluate serve test compare all up down clean
@@ -18,16 +21,16 @@
 # --- Pipeline steps (run locally, need MLflow running in Docker) ---
 
 ingest:
-	python -m src.ingest
+	python -m src ingest
 
 featurise:
-	python -m src.featurise
+	python -m src featurise
 
 train:
-	python -m src.train
+	python -m src train
 
 evaluate:
-	python -m src.evaluate
+	python -m src evaluate
 
 # --- Docker management ---
 
