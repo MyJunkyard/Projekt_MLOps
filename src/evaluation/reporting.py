@@ -11,12 +11,13 @@ import numpy as np
 import pandas as pd
 
 from src.common.splits import get_split_masks
+from src.config.models import DataConfig, PipelineConfig
 
 MODULE_LOGGER_NAME = "src.evaluation.reporting"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
 
 
-def load_model_from_registry(cfg: dict):
+def load_model_from_registry(cfg: PipelineConfig):
     """Load model from MLflow model registry.
 
     Uses the model alias specified in params.yaml (default: champion).
@@ -24,21 +25,21 @@ def load_model_from_registry(cfg: dict):
     is unambiguous.
 
     Args:
-        cfg: Configuration dict with ``mlflow.tracking_uri``,
-            ``mlflow.model_name``, and ``serving.model_alias``.
+        cfg: The validated ``PipelineConfig`` (uses ``mlflow`` and
+            ``serving`` sections).
 
     Returns:
         A loaded MLflow pyfunc model.
     """
-    mlflow.set_tracking_uri(cfg["mlflow"]["tracking_uri"])
-    alias = cfg["serving"]["model_alias"]
-    model_uri = f"models:/{cfg['mlflow']['model_name']}@{alias}"
+    mlflow.set_tracking_uri(cfg.mlflow.tracking_uri)
+    alias = cfg.serving.model_alias
+    model_uri = f"models:/{cfg.mlflow.model_name}@{alias}"
     logger.info("Loading model from %s", model_uri)
     model = mlflow.pyfunc.load_model(model_uri)
     return model
 
 
-def get_model_run_id(cfg: dict) -> str | None:
+def get_model_run_id(cfg: PipelineConfig) -> str | None:
     """Resolve the MLflow run ID that produced the champion model version.
 
     Uses the model alias from ``serving.model_alias`` to look up the
@@ -46,18 +47,18 @@ def get_model_run_id(cfg: dict) -> str | None:
     results can be attached to the model's own run page.
 
     Args:
-        cfg: Configuration dict with ``mlflow.tracking_uri``,
-            ``mlflow.model_name``, and ``serving.model_alias``.
+        cfg: The validated ``PipelineConfig`` (uses ``mlflow`` and
+            ``serving`` sections).
 
     Returns:
         The training run ID, or None if it cannot be resolved (e.g. the
         registry is unavailable or the alias does not exist yet).
     """
     try:
-        mlflow.set_tracking_uri(cfg["mlflow"]["tracking_uri"])
+        mlflow.set_tracking_uri(cfg.mlflow.tracking_uri)
         client = mlflow.MlflowClient()
         version = client.get_model_version_by_alias(
-            cfg["mlflow"]["model_name"], cfg["serving"]["model_alias"]
+            cfg.mlflow.model_name, cfg.serving.model_alias
         )
         return version.run_id
     except Exception as e:
@@ -66,7 +67,7 @@ def get_model_run_id(cfg: dict) -> str | None:
 
 
 def log_evaluation_results(
-    cfg: dict, metrics: dict[str, float], artifact_paths: list[str]
+    cfg: PipelineConfig, metrics: dict[str, float], artifact_paths: list[str]
 ) -> None:
     """Log evaluation metrics and artifacts to MLflow.
 
@@ -77,11 +78,11 @@ def log_evaluation_results(
     anonymous run.
 
     Args:
-        cfg: Configuration dict with MLflow settings.
+        cfg: The validated ``PipelineConfig`` (uses the ``mlflow`` section).
         metrics: Dict of metric name to value.
         artifact_paths: Paths of files to log as artifacts (may be empty).
     """
-    mlflow.set_tracking_uri(cfg["mlflow"]["tracking_uri"])
+    mlflow.set_tracking_uri(cfg.mlflow.tracking_uri)
     run_id = get_model_run_id(cfg)
 
     if run_id is not None:
@@ -108,7 +109,9 @@ def _log_metrics_and_artifacts(
         logger.debug("Artifact logged: %s", path)
 
 
-def load_test_features(path: str, cfg: dict) -> tuple[np.ndarray, np.ndarray]:
+def load_test_features(
+    path: str, data: DataConfig
+) -> tuple[np.ndarray, np.ndarray]:
     """Load test split from features.parquet.
 
     Input contract: the Parquet must contain the featurisation output
@@ -117,8 +120,8 @@ def load_test_features(path: str, cfg: dict) -> tuple[np.ndarray, np.ndarray]:
 
     Args:
         path: Path to the features Parquet file.
-        cfg: Configuration dict with ``data.target_col`` and split dates
-            (``data.train_end``, ``data.val_end``).
+        data: ``DataConfig`` with ``target_col`` and split dates
+            (``train_end``, ``val_end``).
 
     Returns:
         A tuple ``(X_test, y_test)`` of numpy arrays: ``X_test`` of
@@ -127,8 +130,8 @@ def load_test_features(path: str, cfg: dict) -> tuple[np.ndarray, np.ndarray]:
     """
     df = pd.read_parquet(path)
 
-    target_col = cfg["data"]["target_col"]
-    _, _, test_mask = get_split_masks(df, cfg)
+    target_col = data.target_col
+    _, _, test_mask = get_split_masks(df, data)
     df_test = df.iloc[test_mask]
 
     y_test = df_test[target_col].values

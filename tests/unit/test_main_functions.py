@@ -14,6 +14,7 @@ import src.evaluation.main as evaluate_mod
 import src.features.main as featurise_mod
 import src.ingestion.main as ingest_mod
 import src.training.main as train_mod
+from src.config.models import PipelineConfig
 
 
 class TestIngestMain:
@@ -21,7 +22,17 @@ class TestIngestMain:
     def test_main_runs_pipeline(self, mock_load_config, tmp_path, sample_df):
         """Positive: ingest.main() generates, validates, and saves data."""
         raw_dir = tmp_path / "raw"
-        mock_load_config.return_value = {"data": {"raw_path": str(raw_dir) + "/"}}
+        mock_load_config.return_value = PipelineConfig.model_validate(
+            {
+                "data": {
+                    "raw_path": str(raw_dir) + "/",
+                    "target_col": "price_eur_mwh",
+                    "train_end": "2023-12-31",
+                    "val_end": "2024-01-01",
+                },
+                "model": {"type": "sklearn.dummy.DummyRegressor"},
+            }
+        )
 
         with mock.patch(
             "src.ingestion.main.generate_synthetic_data", return_value=sample_df
@@ -47,21 +58,28 @@ class TestFeaturiseMain:
         processed = tmp_path / "processed" / "features.parquet"
         reference = tmp_path / "reference" / "reference.parquet"
 
-        mock_load_config.return_value = {
-            "data": {
-                "raw_path": str(raw_dir) + "/",
-                "processed_path": str(processed),
-                "reference_path": str(reference),
-                "target_col": "price_eur_mwh",
-                "train_end": "2023-12-31",
-                "val_end": "2024-01-01",
-            },
-            "features": {
-                "calendar": {"enabled": True},
-                "lags": {"enabled": True, "periods": [1, 2, 24]},
-                "derivatives": {"enabled": False, "order": [1, 2], "smooth_window": 3},
-            },
-        }
+        mock_load_config.return_value = PipelineConfig.model_validate(
+            {
+                "data": {
+                    "raw_path": str(raw_dir) + "/",
+                    "processed_path": str(processed),
+                    "reference_path": str(reference),
+                    "target_col": "price_eur_mwh",
+                    "train_end": "2023-12-31",
+                    "val_end": "2024-01-01",
+                },
+                "features": {
+                    "calendar": {"enabled": True},
+                    "lags": {"enabled": True, "periods": [1, 2, 24]},
+                    "derivatives": {
+                        "enabled": False,
+                        "order": [1, 2],
+                        "smooth_window": 3,
+                    },
+                },
+                "model": {"type": "sklearn.dummy.DummyRegressor"},
+            }
+        )
 
         featurise_mod.main()
 
@@ -91,9 +109,8 @@ class TestTrainMain:
         )
         sample_df.to_parquet(processed, index=False)
 
-        cfg = dict(sample_config)
-        cfg["data"] = dict(sample_config["data"])
-        cfg["data"]["processed_path"] = str(processed)
+        cfg = sample_config
+        cfg.data.processed_path = str(processed)
         mock_load_config.return_value = cfg
         mock_log.return_value = "run-123"
 
@@ -132,9 +149,8 @@ class TestEvaluateMain:
         )
         sample_df.to_parquet(processed, index=False)
 
-        cfg = dict(sample_config)
-        cfg["data"] = dict(sample_config["data"])
-        cfg["data"]["processed_path"] = str(processed)
+        cfg = sample_config
+        cfg.data.processed_path = str(processed)
         mock_load_config.return_value = cfg
 
         mock_model = mock.MagicMock()

@@ -15,6 +15,7 @@ import pandas as pd
 from src.common.logsetup import setup_logging
 from src.common.splits import get_split_masks
 from src.config import load_config
+from src.config.models import DataConfig
 from src.features.calendar import (
     _get_holiday_dates,
     add_calendar_features,
@@ -49,7 +50,7 @@ def load_raw_data(path: str) -> pd.DataFrame:
 
 
 def train_val_test_split(
-    df: pd.DataFrame, cfg: dict
+    df: pd.DataFrame, data: DataConfig
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Split data into train/val/test sets based on date boundaries in config.
 
@@ -57,13 +58,14 @@ def train_val_test_split(
         df: DataFrame with a tz-aware UTC ``timestamp`` column (the
             featurisation output contract: ``timestamp``, target column,
             and all engineered feature columns).
-        cfg: Configuration dict with ``data.train_end`` and ``data.val_end``.
+        data: ``DataConfig`` with the ``train_end`` and ``val_end``
+            boundaries.
 
     Returns:
         A tuple ``(train_df, val_df, test_df)`` of disjoint DataFrames
         with the same columns as the input.
     """
-    train_mask, val_mask, test_mask = get_split_masks(df, cfg)
+    train_mask, val_mask, test_mask = get_split_masks(df, data)
 
     train = df[train_mask].copy()
     val = df[val_mask].copy()
@@ -140,10 +142,10 @@ def main():
     # every sibling module logger (calendar, lags, derivatives, ...)
     # inherits the handlers and level; leaf-scope would leave them
     # unconfigured (effective WARNING, INFO logs silently dropped).
-    setup_logging(cfg, logger_name="src.features")
-    raw_path = Path(cfg["data"]["raw_path"]) / "entsoe_prices.csv"
-    processed_path = cfg["data"]["processed_path"]
-    reference_path = cfg["data"]["reference_path"]
+    setup_logging(cfg.logging, logger_name="src.features")
+    raw_path = Path(cfg.data.raw_path) / "entsoe_prices.csv"
+    processed_path = cfg.data.processed_path
+    reference_path = cfg.data.reference_path
 
     logger.info("Stage: featurisation")
     logger.info("Loading raw data")
@@ -155,7 +157,7 @@ def main():
     df = df.sort_values("timestamp").reset_index(drop=True)
 
     # Calendar features
-    if cfg["features"]["calendar"]["enabled"]:
+    if cfg.features.calendar.enabled:
         logger.info("Adding calendar features")
         # Build the holiday calendar once for the data's year range (padded
         # by one year on each side) and share it across all holiday features
@@ -175,30 +177,30 @@ def main():
         )
 
     # Lag features
-    if cfg["features"]["lags"]["enabled"]:
-        periods = cfg["features"]["lags"]["periods"]
+    if cfg.features.lags.enabled:
+        periods = cfg.features.lags.periods
         logger.info("Adding lag features for periods: %s", periods)
         df = add_lag_features(df, periods)
 
         # Rolling features
         logger.info("Adding rolling features")
-        df = add_rolling_features(df, cfg["data"]["target_col"])
+        df = add_rolling_features(df, cfg.data.target_col)
         logger.debug(
             "Added rolling features: rolling_mean_24h, rolling_std_24h, "
             "rolling_mean_168h"
         )
 
     # Derivative features
-    if cfg["features"]["derivatives"]["enabled"]:
-        order = cfg["features"]["derivatives"]["order"]
-        smooth_window = cfg["features"]["derivatives"]["smooth_window"]
+    if cfg.features.derivatives.enabled:
+        order = cfg.features.derivatives.order
+        smooth_window = cfg.features.derivatives.smooth_window
         logger.info(
             "Adding derivative features (order=%s, smooth_window=%d)",
             order,
             smooth_window,
         )
         df = add_derivative_features(
-            df, cfg["data"]["target_col"], order=order, smooth_window=smooth_window
+            df, cfg.data.target_col, order=order, smooth_window=smooth_window
         )
 
     # Drop rows with NaN (from lag/derivative creation at start of series)
@@ -213,7 +215,7 @@ def main():
 
     logger.debug("Feature columns after engineering: %s", list(df.columns))
     logger.info("Splitting into train/val/test")
-    train, val, test = train_val_test_split(df, cfg)
+    train, val, test = train_val_test_split(df, cfg.data)
 
     logger.info("Saving processed data")
     save_processed_data(train, val, test, processed_path, reference_path)

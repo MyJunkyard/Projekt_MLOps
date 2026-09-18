@@ -28,10 +28,9 @@ class TestEndToEndPipeline:
     def test_full_pipeline_smoke(self, mock_mlflow, tmp_path, sample_config):
         """Positive: full pipeline runs end-to-end and produces valid outputs."""
         # generate_synthetic_data starts at 2020-01-01; align split dates to it
-        cfg = dict(sample_config)
-        cfg["data"] = dict(sample_config["data"])
-        cfg["data"]["train_end"] = "2020-01-05"
-        cfg["data"]["val_end"] = "2020-01-10"
+        cfg = sample_config
+        cfg.data.train_end = "2020-01-05"
+        cfg.data.val_end = "2020-01-10"
 
         # --- 1. Ingest ---
         df = generate_synthetic_data(n_hours=300, seed=42)
@@ -47,21 +46,21 @@ class TestEndToEndPipeline:
         loaded = add_lag_features(loaded, [1, 2, 24])
         loaded = loaded.dropna().reset_index(drop=True)
 
-        train, val, test = train_val_test_split(loaded, cfg)
+        train, val, test = train_val_test_split(loaded, cfg.data)
         processed = tmp_path / "processed" / "features.parquet"
         reference = tmp_path / "reference" / "reference.parquet"
         save_processed_data(train, val, test, str(processed), str(reference))
 
         # --- 3. Train ---
         X_train, y_train, X_val, y_val, X_test, y_test = load_features(
-            str(processed), cfg
+            str(processed), cfg.data
         )
-        model = load_model(cfg)
+        model = load_model(cfg.model)
         model.fit(X_train, y_train)
 
         # --- 4. Evaluate ---
         y_pred = model.predict(X_test)
-        metrics = compute_metrics(y_test, y_pred, cfg["evaluation"]["metrics"])
+        metrics = compute_metrics(y_test, y_pred, cfg.evaluation.metrics)
 
         # --- Assertions ---
         assert processed.exists()
@@ -81,10 +80,9 @@ class TestEndToEndPipeline:
         self, mock_mlflow, tmp_path, sample_config_stage2
     ):
         """Positive: full pipeline with XGBoost produces finite predictions."""
-        cfg = dict(sample_config_stage2)
-        cfg["data"] = dict(sample_config_stage2["data"])
-        cfg["data"]["train_end"] = "2020-01-05"
-        cfg["data"]["val_end"] = "2020-01-10"
+        cfg = sample_config_stage2
+        cfg.data.train_end = "2020-01-05"
+        cfg.data.val_end = "2020-01-10"
 
         # --- 1. Ingest ---
         df = generate_synthetic_data(n_hours=300, seed=42)
@@ -100,21 +98,21 @@ class TestEndToEndPipeline:
         loaded = add_lag_features(loaded, [1, 2, 24])
         loaded = loaded.dropna().reset_index(drop=True)
 
-        train, val, test = train_val_test_split(loaded, cfg)
+        train, val, test = train_val_test_split(loaded, cfg.data)
         processed = tmp_path / "processed" / "features.parquet"
         reference = tmp_path / "reference" / "reference.parquet"
         save_processed_data(train, val, test, str(processed), str(reference))
 
         # --- 3. Train XGBoost ---
         X_train, y_train, X_val, y_val, X_test, y_test = load_features(
-            str(processed), cfg
+            str(processed), cfg.data
         )
-        model = load_model(cfg)
+        model = load_model(cfg.model)
         model.fit(X_train, y_train)
 
         # --- 4. Evaluate ---
         y_pred = model.predict(X_test)
-        metrics = compute_metrics(y_test, y_pred, cfg["evaluation"]["metrics"])
+        metrics = compute_metrics(y_test, y_pred, cfg.evaluation.metrics)
 
         # --- Assertions ---
         assert processed.exists()

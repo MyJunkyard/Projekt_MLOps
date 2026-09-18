@@ -44,17 +44,17 @@ def main():
     # every sibling module logger (plots, reporting, ...) inherits the
     # handlers and level; leaf-scope would leave them unconfigured
     # (effective WARNING, INFO logs silently dropped).
-    setup_logging(cfg, logger_name="src.evaluation")
-    processed_path = cfg["data"]["processed_path"]
+    setup_logging(cfg.logging, logger_name="src.evaluation")
+    processed_path = cfg.data.processed_path
     reports_dir = Path("reports")
 
     logger.info("Stage: evaluation")
     logger.info("Loading test features")
     df = pd.read_parquet(processed_path)
-    X_test, y_test = load_test_features(processed_path, cfg)
+    X_test, y_test = load_test_features(processed_path, cfg.data)
 
     # Get test DataFrame columns for residual breakdown
-    _, _, test_mask = get_split_masks(df, cfg)
+    _, _, test_mask = get_split_masks(df, cfg.data)
     df_test = df.iloc[test_mask].reset_index(drop=True)
 
     logger.info("Loading model from registry")
@@ -64,13 +64,13 @@ def main():
     y_pred = np.asarray(model.predict(X_test))
 
     logger.info("Computing metrics")
-    metrics = compute_metrics(y_test, y_pred, cfg["evaluation"]["metrics"])
+    metrics = compute_metrics(y_test, y_pred, cfg.evaluation.metrics)
     log_results_table(metrics)
 
     artifact_paths: list[str] = []
 
     # Generate plots if enabled
-    if cfg["evaluation"].get("generate_plots", False):
+    if cfg.evaluation.generate_plots:
         reports_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info("Generating plots")
@@ -79,7 +79,7 @@ def main():
         )
 
         logger.info("Computing residual breakdown")
-        breakdown_df = residual_breakdown(df_test, y_test, y_pred, cfg)
+        breakdown_df = residual_breakdown(df_test, y_test, y_pred, cfg.evaluation)
 
         logger.debug("Residual breakdown:\n%s", breakdown_df.to_string(index=False))
 

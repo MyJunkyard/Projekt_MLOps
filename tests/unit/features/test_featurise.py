@@ -389,17 +389,17 @@ class TestAddDerivativeFeatures:
 
 class TestTrainValTestSplit:
     def test_splits_are_disjoint_and_cover_all(self, sample_df, sample_config):
-        train, val, test = train_val_test_split(sample_df, sample_config)
+        train, val, test = train_val_test_split(sample_df, sample_config.data)
         assert len(train) + len(val) + len(test) == len(sample_df)
 
     def test_split_preserves_order(self, sample_df, sample_config):
-        train, val, test = train_val_test_split(sample_df, sample_config)
+        train, val, test = train_val_test_split(sample_df, sample_config.data)
         assert train["timestamp"].is_monotonic_increasing
         assert val["timestamp"].is_monotonic_increasing
         assert test["timestamp"].is_monotonic_increasing
 
     def test_returns_copies(self, sample_df, sample_config):
-        train, val, test = train_val_test_split(sample_df, sample_config)
+        train, val, test = train_val_test_split(sample_df, sample_config.data)
         train.loc[0, "price_eur_mwh"] = -999.0
         assert sample_df.loc[0, "price_eur_mwh"] != -999.0
 

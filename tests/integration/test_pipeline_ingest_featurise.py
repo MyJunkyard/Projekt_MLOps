@@ -40,17 +40,17 @@ class TestIngestToFeaturise:
         loaded = load_raw_data(str(raw_path))
         loaded = loaded.sort_values("timestamp").reset_index(drop=True)
 
-        if sample_config["features"]["calendar"]["enabled"]:
+        if sample_config.features.calendar.enabled:
             holidays = _get_holiday_dates(loaded)
             loaded = add_calendar_features(loaded, holidays)
 
-        if sample_config["features"]["lags"]["enabled"]:
-            periods = sample_config["features"]["lags"]["periods"]
+        if sample_config.features.lags.enabled:
+            periods = sample_config.features.lags.periods
             loaded = add_lag_features(loaded, periods)
 
         loaded = loaded.dropna().reset_index(drop=True)
 
-        train, val, test = train_val_test_split(loaded, sample_config)
+        train, val, test = train_val_test_split(loaded, sample_config.data)
 
         processed = tmp_path / "processed" / "features.parquet"
         reference = tmp_path / "reference" / "reference.parquet"
@@ -104,12 +104,11 @@ class TestEntsoeToFeaturise:
             [1000.0 + i for i in range(200)], index=timestamps
         )
 
-        cfg = dict(sample_config_stage2)
-        cfg["data"] = dict(sample_config_stage2["data"])
-        cfg["data"]["train_end"] = "2020-01-05"
-        cfg["data"]["val_end"] = "2020-01-08"
+        cfg = sample_config_stage2
+        cfg.data.train_end = "2020-01-05"
+        cfg.data.val_end = "2020-01-08"
 
-        df = download_entsoe_data(cfg)
+        df = download_entsoe_data(cfg.data.entsoe)
         assert "timestamp" in df.columns
         assert "price_eur_mwh" in df.columns
         # include_load defaults to true: the fetched load is merged as
@@ -123,19 +122,19 @@ class TestEntsoeToFeaturise:
         loaded = load_raw_data(str(raw_path))
         loaded = loaded.sort_values("timestamp").reset_index(drop=True)
 
-        if cfg["features"]["calendar"]["enabled"]:
+        if cfg.features.calendar.enabled:
             holidays = _get_holiday_dates(loaded)
             loaded = add_calendar_features(loaded, holidays)
             loaded = add_holiday_proximity_features(loaded, holidays)
 
-        if cfg["features"]["lags"]["enabled"]:
-            periods = cfg["features"]["lags"]["periods"]
+        if cfg.features.lags.enabled:
+            periods = cfg.features.lags.periods
             loaded = add_lag_features(loaded, periods)
-            loaded = add_rolling_features(loaded, cfg["data"]["target_col"])
+            loaded = add_rolling_features(loaded, cfg.data.target_col)
 
         loaded = loaded.dropna().reset_index(drop=True)
 
-        train, val, test = train_val_test_split(loaded, cfg)
+        train, val, test = train_val_test_split(loaded, cfg.data)
 
         processed = tmp_path / "processed" / "features.parquet"
         reference = tmp_path / "reference" / "reference.parquet"

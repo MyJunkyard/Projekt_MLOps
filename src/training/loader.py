@@ -11,19 +11,20 @@ import subprocess
 import pandas as pd
 
 from src.common.splits import get_split_masks
+from src.config.models import DataConfig, ModelConfig
 
 MODULE_LOGGER_NAME = "src.training.loader"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
 
 
-def load_model(cfg: dict):
+def load_model(model_cfg: ModelConfig):
     """Dynamically load a model class from its fully qualified name.
 
     Example: "sklearn.dummy.DummyRegressor" → sklearn.dummy.DummyRegressor
 
     Args:
-        cfg: Configuration dict with ``model.type`` (dotted path) and
-            ``model.params`` (constructor kwargs).
+        model_cfg: ``ModelConfig`` with ``type`` (dotted path) and
+            ``params`` (constructor kwargs).
 
     Returns:
         An instantiated model object.
@@ -32,18 +33,18 @@ def load_model(cfg: dict):
         ImportError: If the module path cannot be imported.
         AttributeError: If the class name is not found in the module.
     """
-    module_path, class_name = cfg["model"]["type"].rsplit(".", 1)
+    module_path, class_name = model_cfg.type.rsplit(".", 1)
     module = importlib.import_module(module_path)
     model_class = getattr(module, class_name)
-    return model_class(**cfg["model"]["params"])
+    return model_class(**model_cfg.params)
 
 
-def load_features(path: str, cfg: dict) -> tuple:
+def load_features(path: str, data: DataConfig) -> tuple:
     """Load features.parquet and separate features (X) from target (y).
 
     Args:
         path: Path to the features Parquet file.
-        cfg: Configuration dict with ``data.target_col`` and split dates.
+        data: ``DataConfig`` with ``target_col`` and split dates.
 
     Returns:
         A tuple ``(X_train, y_train, X_val, y_val, X_test, y_test)`` of
@@ -52,7 +53,7 @@ def load_features(path: str, cfg: dict) -> tuple:
     df = pd.read_parquet(path)
 
     # Separate target
-    target_col = cfg["data"]["target_col"]
+    target_col = data.target_col
     y = df[target_col].values
 
     # Drop non-feature columns
@@ -60,7 +61,7 @@ def load_features(path: str, cfg: dict) -> tuple:
     X = df[feature_cols].values
 
     # Reconstruct splits from the concatenated data using shared split logic
-    train_mask, val_mask, test_mask = get_split_masks(df, cfg)
+    train_mask, val_mask, test_mask = get_split_masks(df, data)
 
     X_train, y_train = X[train_mask], y[train_mask]
     X_val, y_val = X[val_mask], y[val_mask]
@@ -74,18 +75,18 @@ def load_features(path: str, cfg: dict) -> tuple:
     return X_train, y_train, X_val, y_val, X_test, y_test
 
 
-def get_feature_names(path: str, cfg: dict) -> list[str]:
+def get_feature_names(path: str, data: DataConfig) -> list[str]:
     """Get the list of feature column names from the features parquet.
 
     Args:
         path: Path to the features Parquet file.
-        cfg: Configuration dict with ``data.target_col``.
+        data: ``DataConfig`` with ``target_col``.
 
     Returns:
         A list of feature column names (excluding target and timestamp).
     """
     df = pd.read_parquet(path)
-    target_col = cfg["data"]["target_col"]
+    target_col = data.target_col
     feature_cols = [c for c in df.columns if c not in [target_col, "timestamp"]]
     return feature_cols
 

@@ -13,6 +13,7 @@ import mlflow
 from mlflow.sklearn import log_model
 
 from src.common.hashing import compute_params_hash
+from src.config.models import PipelineConfig
 from src.training.loader import get_git_commit_hash
 
 MODULE_LOGGER_NAME = "src.training.registry"
@@ -59,7 +60,7 @@ def log_feature_importances(model, feature_names: list[str]) -> None:
 def log_to_mlflow(
     model,
     metrics: dict[str, float],
-    cfg: dict,
+    cfg: PipelineConfig,
     feature_names: list[str] | None = None,
     run_name: str | None = None,
     promote_to_production: bool = False,
@@ -67,7 +68,7 @@ def log_to_mlflow(
     """Log model, params, and metrics to MLflow.
 
     Logs:
-    - Model parameters (from ``cfg["model"]["params"]``)
+    - Model parameters (from ``model.params``)
     - Model type and feature flags
     - Temporal config (resolution, horizon)
     - Metrics (rmse, mae, mape, r2, etc.)
@@ -84,7 +85,7 @@ def log_to_mlflow(
     Args:
         model: A fitted scikit-learn-compatible model.
         metrics: Dict of metric name to value.
-        cfg: Configuration dict with MLflow and model settings.
+        cfg: The validated ``PipelineConfig``.
         feature_names: List of feature column names (for feature importances).
         run_name: Optional name for the MLflow run.
         promote_to_production: Whether to set the champion alias on the
@@ -94,29 +95,30 @@ def log_to_mlflow(
     Returns:
         The MLflow run ID as a string.
     """
-    mlflow.set_tracking_uri(cfg["mlflow"]["tracking_uri"])
-    mlflow.set_experiment(cfg["mlflow"]["experiment_name"])
+    mlflow.set_tracking_uri(cfg.mlflow.tracking_uri)
+    mlflow.set_experiment(cfg.mlflow.experiment_name)
 
-    model_name = cfg["mlflow"]["model_name"]
+    model_name = cfg.mlflow.model_name
 
     with mlflow.start_run(run_name=run_name) as run:
         run_id = run.info.run_id
 
         # Log model parameters
-        for key, value in cfg["model"]["params"].items():
+        for key, value in cfg.model.params.items():
             mlflow.log_param(key, value)
 
         # Log model type
-        mlflow.log_param("model_type", cfg["model"]["type"])
+        mlflow.log_param("model_type", cfg.model.type)
 
-        # Log feature flags
-        for group, settings in cfg["features"].items():
+        # Log feature flags (serialized view of the feature groups — the
+        # flag names become MLflow param names, so they must stay flat)
+        for group, settings in cfg.features.model_dump().items():
             if isinstance(settings, dict) and "enabled" in settings:
                 mlflow.log_param(f"feature_{group}", settings["enabled"])
 
         # Log temporal config
-        mlflow.log_param("resolution", cfg["temporal"]["resolution"])
-        mlflow.log_param("horizon", cfg["temporal"]["horizon"])
+        mlflow.log_param("resolution", cfg.temporal.resolution)
+        mlflow.log_param("horizon", cfg.temporal.horizon)
 
         # Log params hash for quick run comparison
         params_hash = compute_params_hash()
@@ -145,12 +147,10 @@ def log_to_mlflow(
         # registered but never promoted). An alias points to exactly one
         # version, so multiple promotions cannot accumulate the way registry
         # stages did.
-        promote = promote_to_production and cfg["mlflow"].get(
-            "promote_to_production", True
-        )
+        promote = promote_to_production and cfg.mlflow.promote_to_production
         if promote and model_info.registered_model_version:
             client = mlflow.MlflowClient()
-            alias = cfg["mlflow"].get("champion_alias", "champion")
+            alias = cfg.mlflow.champion_alias
             client.set_registered_model_alias(
                 name=model_name,
                 alias=alias,
@@ -167,7 +167,7 @@ def log_to_mlflow(
                 "(promote_to_production=%s, config=%s)",
                 model_info.registered_model_version,
                 promote_to_production,
-                cfg["mlflow"].get("promote_to_production", True),
+                cfg.mlflow.promote_to_production,
             )
 
         # Log feature importances if available
@@ -178,8 +178,8 @@ def log_to_mlflow(
         mlflow.set_tag("git_commit", get_git_commit_hash())
         mlflow.set_tag("stage", "2")
 
-        logger.debug("MLflow tracking URI: %s", cfg["mlflow"]["tracking_uri"])
-        logger.debug("MLflow experiment: %s", cfg["mlflow"]["experiment_name"])
+        logger.debug("MLflow tracking URI: %s", cfg.mlflow.tracking_uri)
+        logger.debug("MLflow experiment: %s", cfg.mlflow.experiment_name)
         logger.info("MLflow run ID: %s", run_id)
 
     return run_id

@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.config.models import EvaluationConfig
 from src.evaluation.plots import plot_actual_vs_predicted, residual_breakdown
 from src.evaluation.reporting import (
     get_model_run_id,
@@ -22,14 +23,14 @@ from src.evaluation.reporting import (
 class TestLoadTestFeatures:
     def test_returns_x_and_y(self, features_parquet_path, sample_config):
         """Positive: returns X_test and y_test arrays."""
-        X_test, y_test = load_test_features(features_parquet_path, sample_config)
+        X_test, y_test = load_test_features(features_parquet_path, sample_config.data)
         assert X_test.shape[0] == y_test.shape[0]
         assert X_test.shape[0] > 0
 
     def test_missing_file_raises(self, tmp_path, sample_config):
         """Negative: missing parquet raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
-            load_test_features(str(tmp_path / "nope.parquet"), sample_config)
+            load_test_features(str(tmp_path / "nope.parquet"), sample_config.data)
 
 
 class TestLogResultsTable:
@@ -80,9 +81,9 @@ class TestResidualBreakdown:
         )
         y_true = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
         y_pred = np.array([15.0, 15.0, 35.0, 35.0, 55.0, 55.0])
-        cfg = {"evaluation": {"residual_breakdown": ["hour"]}}
+        evaluation = EvaluationConfig(residual_breakdown=["hour"])
 
-        result = residual_breakdown(df, y_true, y_pred, cfg)
+        result = residual_breakdown(df, y_true, y_pred, evaluation)
         assert "grouping" in result.columns
         assert "category" in result.columns
         assert "mean_abs_residual" in result.columns
@@ -101,9 +102,9 @@ class TestResidualBreakdown:
         )
         y_true = np.array([10.0, 20.0, 30.0, 40.0])
         y_pred = np.array([10.0, 20.0, 35.0, 45.0])
-        cfg = {"evaluation": {"residual_breakdown": ["is_holiday"]}}
+        evaluation = EvaluationConfig(residual_breakdown=["is_holiday"])
 
-        result = residual_breakdown(df, y_true, y_pred, cfg)
+        result = residual_breakdown(df, y_true, y_pred, evaluation)
         assert len(result) == 2
         # Holidays have mean residual of (5+5)/2 = 5
         holiday_row = result[result["category"] == True]  # noqa: E712
@@ -114,9 +115,9 @@ class TestResidualBreakdown:
         df = pd.DataFrame({"hour": [0, 1]})
         y_true = np.array([1.0, 2.0])
         y_pred = np.array([1.0, 2.0])
-        cfg = {"evaluation": {"residual_breakdown": ["hour"]}}
+        evaluation = EvaluationConfig(residual_breakdown=["hour"])
 
-        result = residual_breakdown(df, y_true, y_pred, cfg)
+        result = residual_breakdown(df, y_true, y_pred, evaluation)
         assert isinstance(result, pd.DataFrame)
 
 
@@ -131,8 +132,8 @@ class TestGetModelRunId:
 
         assert run_id == "train-run-1"
         mock_client.get_model_version_by_alias.assert_called_once_with(
-            sample_config["mlflow"]["model_name"],
-            sample_config["serving"]["model_alias"],
+            sample_config.mlflow.model_name,
+            sample_config.serving.model_alias,
         )
 
     @mock.patch("src.evaluation.reporting.mlflow")

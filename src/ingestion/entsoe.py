@@ -14,6 +14,8 @@ import os
 import numpy as np
 import pandas as pd
 
+from src.config.models import EntsoeConfig
+
 # ENTSoE client: entsoe-py >= 0.10 renamed the client to `EntsoeClient`;
 # earlier versions used `EntsoePandasClient`. Support both.
 try:
@@ -111,7 +113,7 @@ def generate_synthetic_data(
     return df
 
 
-def download_entsoe_data(cfg: dict) -> pd.DataFrame:
+def download_entsoe_data(entsoe: EntsoeConfig) -> pd.DataFrame:
     """Download day-ahead prices and actual load from ENTSO-E.
 
     Uses the entsoe-py client to fetch data for the configured bidding zone
@@ -119,14 +121,13 @@ def download_entsoe_data(cfg: dict) -> pd.DataFrame:
     environment variable.
 
     Args:
-        cfg: Configuration dict with ``data.entsoe.bidding_zone``,
-            ``data.entsoe.start_date`` and optionally
-            ``data.entsoe.include_load``.
+        entsoe: ``EntsoeConfig`` with ``bidding_zone``, ``start_date``,
+            and ``include_load``.
 
     Returns:
         A DataFrame with ``timestamp`` (tz-aware UTC) and ``price_eur_mwh``
-        (float) columns, plus ``load_mw`` (float) when
-        ``data.entsoe.include_load`` is true (the default).
+        (float) columns, plus ``load_mw`` (float) when ``include_load``
+        is true (the default).
 
     Raises:
         ValueError: If no ENTSOE_API_KEY environment variable is set.
@@ -138,13 +139,11 @@ def download_entsoe_data(cfg: dict) -> pd.DataFrame:
             "Falling back to synthetic data."
         )
 
-    entsoe_cfg = cfg.get("data", {}).get("entsoe", {})
-    bidding_zone = entsoe_cfg.get("bidding_zone", "PSE")
-    start_date = entsoe_cfg.get("start_date", "2018-01-01")
+    bidding_zone = entsoe.bidding_zone
 
     client = EntsoeClient(api_key=api_key)
 
-    start = pd.Timestamp(start_date, tz="UTC")
+    start = pd.Timestamp(entsoe.start_date, tz="UTC")
     end = pd.Timestamp.now(tz="UTC")
 
     logger.info(
@@ -162,9 +161,8 @@ def download_entsoe_data(cfg: dict) -> pd.DataFrame:
     df = pd.DataFrame({"timestamp": prices.index, "price_eur_mwh": prices.values})
 
     # Download actual load and merge it as a load_mw column (review point 3:
-    # the result is no longer discarded). Gated by data.entsoe.include_load.
-    include_load = entsoe_cfg.get("include_load", True)
-    if include_load:
+    # the result is no longer discarded). Gated by include_load.
+    if entsoe.include_load:
         load = _normalize_load_series(
             client.query_load(bidding_zone, start=start, end=end)
         )

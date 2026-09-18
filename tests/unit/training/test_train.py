@@ -3,7 +3,6 @@ Unit tests for the training package — model loading, feature loading, git hash
 MLflow logging, baselines, params hash, feature importances.
 """
 
-import copy
 import subprocess
 from unittest import mock
 
@@ -12,6 +11,7 @@ import pandas as pd
 import pytest
 
 from src.common.hashing import compute_params_hash
+from src.config.models import ModelConfig
 from src.training.baselines import (
     PersistenceModel,
     SeasonalNaiveModel,
@@ -30,40 +30,38 @@ from src.training.registry import log_feature_importances, log_to_mlflow
 class TestLoadModel:
     def test_loads_dummy_regressor(self, sample_config):
         """Positive: instantiates model from fully-qualified name."""
-        model = load_model(sample_config)
+        model = load_model(sample_config.model)
         assert model.__class__.__name__ == "DummyRegressor"
 
     def test_loads_xgboost_regressor(self, sample_config_stage2):
         """Positive: loads xgboost.XGBRegressor from config."""
-        model = load_model(sample_config_stage2)
+        model = load_model(sample_config_stage2.model)
         assert model.__class__.__name__ == "XGBRegressor"
 
     def test_xgboost_params_passed(self, sample_config_stage2):
         """Positive: hyperparameters are passed to the constructor."""
-        model = load_model(sample_config_stage2)
+        model = load_model(sample_config_stage2.model)
         assert model.n_estimators == 10
         assert model.max_depth == 3
         assert model.learning_rate == 0.1
 
-    def test_invalid_module_raises(self, sample_config):
+    def test_invalid_module_raises(self):
         """Negative: unknown module raises ImportError."""
-        cfg = dict(sample_config)
-        cfg["model"] = {"type": "no.such.module.Model", "params": {}}
+        model_cfg = ModelConfig(type="no.such.module.Model", params={})
         with pytest.raises(ImportError):
-            load_model(cfg)
+            load_model(model_cfg)
 
-    def test_invalid_class_raises(self, sample_config):
+    def test_invalid_class_raises(self):
         """Negative: unknown class raises AttributeError."""
-        cfg = dict(sample_config)
-        cfg["model"] = {"type": "sklearn.dummy.NoSuchClass", "params": {}}
+        model_cfg = ModelConfig(type="sklearn.dummy.NoSuchClass", params={})
         with pytest.raises(AttributeError):
-            load_model(cfg)
+            load_model(model_cfg)
 
 
 class TestGetFeatureNames:
     def test_returns_feature_names(self, features_parquet_path, sample_config):
         """Positive: returns all feature column names."""
-        names = get_feature_names(features_parquet_path, sample_config)
+        names = get_feature_names(features_parquet_path, sample_config.data)
         assert "hour" in names
         assert "lag_1h" in names
         assert "price_eur_mwh" not in names
@@ -74,7 +72,7 @@ class TestLoadFeatures:
     def test_returns_correct_shapes(self, features_parquet_path, sample_config):
         """Positive: returns X/y splits with expected shapes."""
         X_train, y_train, X_val, y_val, X_test, y_test = load_features(
-            features_parquet_path, sample_config
+            features_parquet_path, sample_config.data
         )
         assert X_train.shape[0] == y_train.shape[0]
         assert X_val.shape[0] == y_val.shape[0]
@@ -84,7 +82,7 @@ class TestLoadFeatures:
 
     def test_excludes_target_and_timestamp(self, features_parquet_path, sample_config):
         """Positive: feature matrix excludes target and timestamp columns."""
-        X_train, *_ = load_features(features_parquet_path, sample_config)
+        X_train, *_ = load_features(features_parquet_path, sample_config.data)
         df = pd.read_parquet(features_parquet_path)
         feature_cols = [
             c for c in df.columns if c not in ["price_eur_mwh", "timestamp"]
@@ -94,7 +92,7 @@ class TestLoadFeatures:
     def test_missing_file_raises(self, tmp_path, sample_config):
         """Negative: missing parquet raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
-            load_features(str(tmp_path / "nope.parquet"), sample_config)
+            load_features(str(tmp_path / "nope.parquet"), sample_config.data)
 
 
 class TestGetGitCommitHash:
@@ -343,7 +341,7 @@ class TestLogToMlflowPromotion:
 
         mock_mlflow.MlflowClient.return_value.set_registered_model_alias.\
             assert_called_once_with(
-                name=sample_config["mlflow"]["model_name"],
+                name=sample_config.mlflow.model_name,
                 alias="champion",
                 version="3",
             )
@@ -368,8 +366,8 @@ class TestLogToMlflowPromotion:
         self, mock_mlflow, mock_log_model, sample_config
     ):
         """Negative: config gate off suppresses promotion even with flag set."""
-        cfg = copy.deepcopy(sample_config)
-        cfg["mlflow"]["promote_to_production"] = False
+        cfg = sample_config
+        cfg.mlflow.promote_to_production = False
         mock_run = mock.MagicMock()
         mock_run.info.run_id = "run-gated"
         mock_mlflow.start_run.return_value.__enter__.return_value = mock_run
@@ -381,26 +379,6 @@ class TestLogToMlflowPromotion:
 
         mock_mlflow.MlflowClient.return_value.set_registered_model_alias.\
             assert_not_called()
-
-    @mock.patch("src.training.registry.log_model")
-    @mock.patch("src.training.registry.mlflow")
-    def test_config_gate_missing_defaults_to_promote(
-        self, mock_mlflow, mock_log_model, sample_config
-    ):
-        """Positive: missing config key defaults to promotion enabled."""
-        cfg = copy.deepcopy(sample_config)
-        del cfg["mlflow"]["promote_to_production"]
-        mock_run = mock.MagicMock()
-        mock_run.info.run_id = "run-default"
-        mock_mlflow.start_run.return_value.__enter__.return_value = mock_run
-        mock_log_model.return_value = mock.MagicMock(registered_model_version="6")
-
-        log_to_mlflow(
-            mock.MagicMock(), {"rmse": 1.0}, cfg, promote_to_production=True
-        )
-
-        mock_mlflow.MlflowClient.return_value.set_registered_model_alias.\
-            assert_called_once()
 
     @mock.patch("src.training.registry.log_model")
     @mock.patch("src.training.registry.mlflow")
@@ -426,8 +404,8 @@ class TestLogToMlflowPromotion:
         self, mock_mlflow, mock_log_model, sample_config
     ):
         """Positive: alias name is taken from mlflow.champion_alias."""
-        cfg = copy.deepcopy(sample_config)
-        cfg["mlflow"]["champion_alias"] = "prod"
+        cfg = sample_config
+        cfg.mlflow.champion_alias = "prod"
         mock_run = mock.MagicMock()
         mock_run.info.run_id = "run-alias"
         mock_mlflow.start_run.return_value.__enter__.return_value = mock_run
@@ -439,7 +417,7 @@ class TestLogToMlflowPromotion:
 
         mock_mlflow.MlflowClient.return_value.set_registered_model_alias.\
             assert_called_once_with(
-                name=cfg["mlflow"]["model_name"],
+                name=cfg.mlflow.model_name,
                 alias="prod",
                 version="7",
             )

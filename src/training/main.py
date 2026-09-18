@@ -36,17 +36,19 @@ def main():
     # every sibling module logger (loader, registry, baselines, ...)
     # inherits the handlers and level; leaf-scope would leave them
     # unconfigured (effective WARNING, INFO logs silently dropped).
-    setup_logging(cfg, logger_name="src.training")
-    processed_path = cfg["data"]["processed_path"]
+    setup_logging(cfg.logging, logger_name="src.training")
+    processed_path = cfg.data.processed_path
 
     logger.info("Stage: training")
     logger.info("Loading features")
-    X_train, y_train, X_val, y_val, X_test, y_test = load_features(processed_path, cfg)
-    feature_names = get_feature_names(processed_path, cfg)
+    X_train, y_train, X_val, y_val, X_test, y_test = load_features(
+        processed_path, cfg.data
+    )
+    feature_names = get_feature_names(processed_path, cfg.data)
 
     # --- Train XGBoost ---
-    logger.info("Loading model: %s", cfg["model"]["type"])
-    model = load_model(cfg)
+    logger.info("Loading model: %s", cfg.model.type)
+    model = load_model(cfg.model)
     logger.debug("Model: %s", model)
 
     logger.info("Training XGBoost")
@@ -55,7 +57,7 @@ def main():
 
     logger.info("Evaluating on validation set")
     y_pred = np.asarray(model.predict(X_val))
-    metrics = compute_metrics(y_val, y_pred, cfg["evaluation"]["metrics"])
+    metrics = compute_metrics(y_val, y_pred, cfg.evaluation.metrics)
     for name, value in metrics.items():
         logger.info("Validation %s: %.4f", name, value)
 

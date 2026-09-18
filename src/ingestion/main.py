@@ -13,11 +13,7 @@ from src.common.logsetup import setup_logging
 from src.config import load_config
 from src.ingestion.entsoe import download_entsoe_data, generate_synthetic_data
 from src.ingestion.manifest import save_raw_data, write_manifest
-from src.ingestion.validation import (
-    fill_gaps,
-    validate_entsoe_data,
-    validate_schema,
-)
+from src.ingestion.validation import fill_gaps, validate_entsoe_data
 
 # Stable module name (not `__name__` — under `python -m` it is `"__main__"`
 # and would bypass the configured src logger).
@@ -34,30 +30,21 @@ def main():
     # every sibling module logger (entsoe, validation, manifest, ...)
     # inherits the handlers and level; leaf-scope would leave them
     # unconfigured (effective WARNING, INFO logs silently dropped).
-    setup_logging(cfg, logger_name="src.ingestion")
-    raw_path = cfg["data"]["raw_path"]
-    max_gap_periods = cfg.get("data", {}).get("max_gap_periods", 2)
-    fill_method = cfg.get("data", {}).get("fill_method", "ffill")
-    freq = {
-        "hourly": "h",
-        "daily": "D",
-        "weekly": "W",
-    }.get(cfg.get("temporal", {}).get("resolution", "hourly"), "h")
+    setup_logging(cfg.logging, logger_name="src.ingestion")
+    raw_path = cfg.data.raw_path
+    freq = cfg.temporal.pandas_freq
 
     logger.info("Stage: ingestion")
 
     # Try to download real data; fall back to synthetic if no API key
     try:
         logger.info("Attempting ENTSO-E data download")
-        df = download_entsoe_data(cfg)
+        df = download_entsoe_data(cfg.data.entsoe)
         logger.info("Downloaded %s rows from ENTSO-E", f"{len(df):,}")
     except ValueError as e:
         logger.warning("ENTSO-E download unavailable: %s", e)
         logger.warning("Falling back to synthetic data generation")
-        include_load = (
-            cfg.get("data", {}).get("entsoe", {}).get("include_load", True)
-        )
-        df = generate_synthetic_data(include_load=include_load)
+        df = generate_synthetic_data(include_load=cfg.data.entsoe.include_load)
         logger.info("Generated %s synthetic rows", f"{len(df):,}")
 
     # Guard against empty data (review point 4): a successful download can
@@ -78,10 +65,7 @@ def main():
     # Validate
     logger.debug("Data columns: %s", list(df.columns))
     logger.info("Validating data")
-    if "entsoe" in cfg.get("data", {}):
-        validate_entsoe_data(df, cfg)
-    else:
-        validate_schema(df)
+    validate_entsoe_data(df, cfg.data, cfg.temporal)
     logger.info("Validation passed")
 
     # Fill short gaps only (long gaps remain NaN — never ffilled).
@@ -91,21 +75,22 @@ def main():
     # rows per period that fill_gaps would then misclassify as long gaps).
     logger.info(
         "Filling gaps (max_gap_periods=%d, fill_method=%s, freq=%s)",
-        max_gap_periods,
-        fill_method,
+        cfg.data.max_gap_periods,
+        cfg.data.fill_method,
         freq,
     )
     df, imputation_stats = fill_gaps(
         df,
-        max_gap_periods=max_gap_periods,
-        fill_method=fill_method,
+        max_gap_periods=cfg.data.max_gap_periods,
+        fill_method=cfg.data.fill_method,
         freq=freq,
+        add_is_imputed_flag=cfg.data.add_is_imputed_flag,
     )
 
     # Explicitly drop (or retain) rows that remain NaN after imputation —
     # governed by the data.drop_long_gaps config flag (review points 1 and 1b).
     n_unfilled = imputation_stats["n_unfilled"]
-    if cfg.get("data", {}).get("drop_long_gaps", True):
+    if cfg.data.drop_long_gaps:
         before = len(df)
         df = df.dropna().reset_index(drop=True)
         n_dropped = before - len(df)
@@ -114,7 +99,7 @@ def main():
                 "Dropped %d rows with remaining NaN values "
                 "(gaps longer than max_gap_periods=%d)",
                 n_dropped,
-                max_gap_periods,
+                cfg.data.max_gap_periods,
             )
         # All unfilled rows were removed, so nothing remains unfilled
         imputation_stats["n_unfilled_rows"] = 0

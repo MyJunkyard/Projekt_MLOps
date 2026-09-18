@@ -21,9 +21,9 @@ class TestTrainEvaluateFlow:
     def test_train_then_evaluate(self, features_parquet_path, sample_config):
         """Positive: load features, train model, evaluate on test split."""
         X_train, y_train, X_val, y_val, X_test, y_test = load_features(
-            features_parquet_path, sample_config
+            features_parquet_path, sample_config.data
         )
-        model = load_model(sample_config)
+        model = load_model(sample_config.model)
         model.fit(X_train, y_train)
 
         # Model is fitted and can predict
@@ -32,7 +32,7 @@ class TestTrainEvaluateFlow:
 
         # --- Evaluate stage ---
         X_test_eval, y_test_eval = load_test_features(
-            features_parquet_path, sample_config
+            features_parquet_path, sample_config.data
         )
         y_pred_test = model.predict(X_test_eval)
         assert y_pred_test.shape == y_test_eval.shape
@@ -43,10 +43,10 @@ class TestTrainEvaluateFlow:
     ):
         """Positive: train and evaluate use the same test split."""
         _, _, _, _, X_test_train, y_test_train = load_features(
-            features_parquet_path, sample_config
+            features_parquet_path, sample_config.data
         )
         X_test_eval, y_test_eval = load_test_features(
-            features_parquet_path, sample_config
+            features_parquet_path, sample_config.data
         )
         np.testing.assert_array_equal(X_test_train, X_test_eval)
         np.testing.assert_array_equal(y_test_train, y_test_eval)
@@ -66,15 +66,15 @@ class TestTrainEvaluateFlow:
         from src.training.registry import log_to_mlflow
 
         X_train, y_train, X_val, y_val, _, _ = load_features(
-            features_parquet_path, sample_config
+            features_parquet_path, sample_config.data
         )
-        model = load_model(sample_config)
+        model = load_model(sample_config.model)
         model.fit(X_train, y_train)
         y_pred = model.predict(X_val)
 
         from src.common.metrics import compute_metrics
 
-        metrics = compute_metrics(y_val, y_pred, sample_config["evaluation"]["metrics"])
+        metrics = compute_metrics(y_val, y_pred, sample_config.evaluation.metrics)
         run_id = log_to_mlflow(model, metrics, sample_config)
         assert run_id == "integration-run"
         mock_mlflow.log_metric.assert_any_call("rmse", metrics["rmse"])
@@ -86,10 +86,10 @@ class TestXGBoostVsBaselines:
     ):
         """Positive: XGBoost fit + predict succeeds with finite metrics."""
         X_train, y_train, X_val, y_val, _, _ = load_features(
-            features_parquet_path, sample_config_stage2
+            features_parquet_path, sample_config_stage2.data
         )
 
-        model = load_model(sample_config_stage2)
+        model = load_model(sample_config_stage2.model)
         model.fit(X_train, y_train)
         y_pred_xgb = model.predict(X_val)
 
@@ -104,7 +104,7 @@ class TestXGBoostVsBaselines:
     ):
         """Positive: baselines train and produce finite metrics."""
         X_train, y_train, X_val, y_val, _, _ = load_features(
-            features_parquet_path, sample_config_stage2
+            features_parquet_path, sample_config_stage2.data
         )
 
         _, persistence_metrics = train_baseline_persistence(
@@ -133,18 +133,20 @@ class TestXGBoostVsBaselines:
         from src.training.registry import log_to_mlflow
 
         X_train, y_train, X_val, y_val, _, _ = load_features(
-            features_parquet_path, sample_config_stage2
+            features_parquet_path, sample_config_stage2.data
         )
-        feature_names = get_feature_names(features_parquet_path, sample_config_stage2)
+        feature_names = get_feature_names(
+            features_parquet_path, sample_config_stage2.data
+        )
 
-        model = load_model(sample_config_stage2)
+        model = load_model(sample_config_stage2.model)
         model.fit(X_train, y_train)
         y_pred = model.predict(X_val)
 
         from src.common.metrics import compute_metrics
 
         metrics = compute_metrics(
-            y_val, y_pred, sample_config_stage2["evaluation"]["metrics"]
+            y_val, y_pred, sample_config_stage2.evaluation.metrics
         )
         log_to_mlflow(model, metrics, sample_config_stage2, feature_names=feature_names)
 
@@ -177,6 +179,6 @@ class TestOnlyPrimaryModelPromoted:
             set_registered_model_alias.call_args_list
         assert len(alias_calls) == 1
         call = alias_calls[0]
-        assert call.kwargs["name"] == sample_config_stage2["mlflow"]["model_name"]
+        assert call.kwargs["name"] == sample_config_stage2.mlflow.model_name
         assert call.kwargs["alias"] == "champion"
         assert call.kwargs["version"] == "1"

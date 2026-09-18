@@ -4,6 +4,8 @@ common/metrics.py — Regression metric computation.
 Moved verbatim from ``utils.py`` (Workstream 0 module restructure).
 """
 
+from collections.abc import Sequence
+
 import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
@@ -11,7 +13,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 def compute_metrics(
     y_true: np.ndarray | list[float],
     y_pred: np.ndarray | list[float],
-    metrics_list: list[str],
+    metrics_list: Sequence[str],
 ) -> dict[str, float]:
     """Compute requested regression metrics and return as a dict.
 
@@ -22,7 +24,9 @@ def compute_metrics(
         y_pred: Predicted target values. Array-like of shape
             (n_samples,); normalized the same way.
         metrics_list: Names of metrics to compute. Supported values:
-            ``"rmse"``, ``"mae"``, ``"mape"``, ``"r2"``.
+            ``"rmse"``, ``"mae"``, ``"mape"``, ``"r2"``. Any sequence of
+            strings is accepted (e.g. ``evaluation.metrics`` from the
+            config); unsupported names are silently skipped.
 
     Returns:
         A dict mapping each requested metric name to its float value.

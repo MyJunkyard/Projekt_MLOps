@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from src.config.models import EvaluationConfig
+
 MODULE_LOGGER_NAME = "src.evaluation.plots"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
 
@@ -63,7 +65,7 @@ def residual_breakdown(
     df: pd.DataFrame,
     y_true: np.ndarray | list[float],
     y_pred: np.ndarray | list[float],
-    cfg: dict,
+    evaluation: EvaluationConfig,
 ) -> pd.DataFrame:
     """Compute mean absolute residual grouped by categorical variables.
 
@@ -80,7 +82,7 @@ def residual_breakdown(
             ``np.asarray``.
         y_pred: Predicted target values. Array-like of the same length
             as ``y_true``; normalized the same way.
-        cfg: Configuration dict with ``evaluation.residual_breakdown``
+        evaluation: ``EvaluationConfig`` with ``residual_breakdown``
             (list of grouping column names).
 
     Returns:
@@ -90,7 +92,7 @@ def residual_breakdown(
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
     residuals = np.abs(y_true - y_pred)
-    breakdown_cols = cfg["evaluation"]["residual_breakdown"]
+    breakdown_cols = evaluation.residual_breakdown
 
     rows = []
     for col in breakdown_cols:

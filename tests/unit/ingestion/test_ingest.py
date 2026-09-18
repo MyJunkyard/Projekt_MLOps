@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.config.models import DataConfig, EntsoeConfig, PipelineConfig, TemporalConfig
 from src.ingestion.entsoe import download_entsoe_data, generate_synthetic_data
 from src.ingestion.main import main
 from src.ingestion.manifest import save_raw_data, write_manifest
@@ -217,7 +218,7 @@ class TestDownloadEntsoeData:
             np.linspace(1000, 2000, 24), index=timestamps
         )
 
-        df = download_entsoe_data(sample_config_stage2)
+        df = download_entsoe_data(sample_config_stage2.data.entsoe)
         # include_load defaults to true, so load_mw is merged in
         assert list(df.columns) == ["timestamp", "price_eur_mwh", "load_mw"]
         assert len(df) == 24
@@ -237,16 +238,14 @@ class TestDownloadEntsoeData:
         prices = pd.Series(np.linspace(40, 60, 24), index=timestamps)
         mock_client.query_day_ahead_prices.return_value = prices
 
-        cfg = {
-            "data": {
-                "entsoe": {
-                    "bidding_zone": "PSE",
-                    "start_date": "2024-01-01",
-                    "include_load": False,
-                }
+        entsoe = EntsoeConfig.model_validate(
+            {
+                "bidding_zone": "PSE",
+                "start_date": "2024-01-01",
+                "include_load": False,
             }
-        }
-        df = download_entsoe_data(cfg)
+        )
+        df = download_entsoe_data(entsoe)
         mock_client.query_load.assert_not_called()
         assert list(df.columns) == ["timestamp", "price_eur_mwh"]
         assert len(df) == 24
@@ -272,7 +271,7 @@ class TestDownloadEntsoeData:
         mock_client.query_day_ahead_prices.return_value = prices
         mock_client.query_load.return_value = load_df
 
-        df = download_entsoe_data(sample_config_stage2)
+        df = download_entsoe_data(sample_config_stage2.data.entsoe)
         assert "load_mw" in df.columns
         assert len(df) == 24
         assert df["load_mw"].notna().all()
@@ -293,7 +292,7 @@ class TestDownloadEntsoeData:
             np.linspace(1000, 2000, 24), index=timestamps
         )
 
-        download_entsoe_data(sample_config_stage2)
+        download_entsoe_data(sample_config_stage2.data.entsoe)
         mock_client.query_day_ahead_prices.assert_called_once()
         args, _ = mock_client.query_day_ahead_prices.call_args
         assert args[0] == "PSE"
@@ -302,7 +301,7 @@ class TestDownloadEntsoeData:
     def test_download_falls_back_to_synthetic(self, sample_config_stage2):
         """Negative: no API key raises ValueError."""
         with pytest.raises(ValueError, match="ENTSOE_API_KEY"):
-            download_entsoe_data(sample_config_stage2)
+            download_entsoe_data(sample_config_stage2.data.entsoe)
 
 
 # ---------------------------------------------------------------------------
@@ -311,20 +310,29 @@ class TestDownloadEntsoeData:
 class TestValidateEntsoeData:
     def test_valid_data_passes(self, sample_df, sample_config_stage2):
         """Positive: a valid DataFrame returns True."""
-        assert validate_entsoe_data(sample_df, sample_config_stage2) is True
+        assert (
+            validate_entsoe_data(
+                sample_df, sample_config_stage2.data, sample_config_stage2.temporal
+            )
+            is True
+        )
 
     def test_missing_column_raises(self, sample_df, sample_config_stage2):
         """Negative: missing required column raises ValueError."""
         bad = sample_df.drop(columns=["price_eur_mwh"])
         with pytest.raises(ValueError, match="price_eur_mwh"):
-            validate_entsoe_data(bad, sample_config_stage2)
+            validate_entsoe_data(
+                bad, sample_config_stage2.data, sample_config_stage2.temporal
+            )
 
     def test_naive_timestamp_raises(self, sample_df, sample_config_stage2):
         """Negative: tz-naive timestamp raises ValueError."""
         bad = sample_df.copy()
         bad["timestamp"] = bad["timestamp"].dt.tz_localize(None)
         with pytest.raises(ValueError, match="timezone"):
-            validate_entsoe_data(bad, sample_config_stage2)
+            validate_entsoe_data(
+                bad, sample_config_stage2.data, sample_config_stage2.temporal
+            )
 
     def test_gap_detection_warns_not_raises(
         self, sample_df, sample_config_stage2, caplog
@@ -340,7 +348,12 @@ class TestValidateEntsoeData:
         # Remove three consecutive rows to create a 4-hour gap
         bad = bad.drop(index=[5, 6, 7]).reset_index(drop=True)
         with caplog.at_level(logging.WARNING):
-            assert validate_entsoe_data(bad, sample_config_stage2) is True
+            assert (
+                validate_entsoe_data(
+                    bad, sample_config_stage2.data, sample_config_stage2.temporal
+                )
+                is True
+            )
         assert "gap" in caplog.text.lower()
         assert "gap-filling" in caplog.text.lower()
 
@@ -354,18 +367,27 @@ class TestValidateEntsoeData:
         """
         bad = sample_df.copy().drop(index=[5, 6]).reset_index(drop=True)
         with caplog.at_level(logging.WARNING):
-            assert validate_entsoe_data(bad, sample_config_stage2) is True
+            assert (
+                validate_entsoe_data(
+                    bad, sample_config_stage2.data, sample_config_stage2.temporal
+                )
+                is True
+            )
         assert "gap" not in caplog.text.lower()
 
     def test_max_gap_periods_from_config(self, sample_df):
         """Positive: gap threshold is read from data.max_gap_periods."""
-        cfg = {
-            "data": {"max_gap_periods": 24},
-            "temporal": {"resolution": "hourly"},
-        }
+        data = DataConfig.model_validate(
+            {
+                "target_col": "price_eur_mwh",
+                "train_end": "2023-12-31",
+                "val_end": "2024-01-01",
+                "max_gap_periods": 24,
+            }
+        )
         # 3-hour gap is NOT a problem when max_gap_periods=24
         bad = sample_df.copy().drop(index=[5, 6]).reset_index(drop=True)
-        assert validate_entsoe_data(bad, cfg) is True
+        assert validate_entsoe_data(bad, data, TemporalConfig()) is True
 
     @staticmethod
     def _daily_df():
@@ -385,12 +407,17 @@ class TestValidateEntsoeData:
         3-day diff would have been impossible for hourly data.)
         """
         bad = self._daily_df().drop(index=[4, 5, 6]).reset_index(drop=True)
-        cfg = {
-            "data": {"max_gap_periods": 2},
-            "temporal": {"resolution": "daily"},
-        }
+        data = DataConfig.model_validate(
+            {
+                "target_col": "price_eur_mwh",
+                "train_end": "2023-12-31",
+                "val_end": "2024-01-01",
+                "max_gap_periods": 2,
+            }
+        )
+        temporal = TemporalConfig(resolution="daily")
         with caplog.at_level(logging.WARNING):
-            assert validate_entsoe_data(bad, cfg) is True
+            assert validate_entsoe_data(bad, data, temporal) is True
         assert "gap" in caplog.text.lower()
 
     def test_daily_resolution_fillable_gap_no_warn(self, caplog):
@@ -401,12 +428,17 @@ class TestValidateEntsoeData:
         of the period_map (review point 7).
         """
         bad = self._daily_df().drop(index=[4, 5]).reset_index(drop=True)
-        cfg = {
-            "data": {"max_gap_periods": 2},
-            "temporal": {"resolution": "daily"},
-        }
+        data = DataConfig.model_validate(
+            {
+                "target_col": "price_eur_mwh",
+                "train_end": "2023-12-31",
+                "val_end": "2024-01-01",
+                "max_gap_periods": 2,
+            }
+        )
+        temporal = TemporalConfig(resolution="daily")
         with caplog.at_level(logging.WARNING):
-            assert validate_entsoe_data(bad, cfg) is True
+            assert validate_entsoe_data(bad, data, temporal) is True
         assert "gap" not in caplog.text.lower()
 
     def test_weekly_resolution_gap_warns(self, caplog):
@@ -423,12 +455,17 @@ class TestValidateEntsoeData:
             {"timestamp": timestamps, "price_eur_mwh": np.linspace(40, 60, 8)}
         )
         bad = df.drop(index=[3, 4, 5]).reset_index(drop=True)
-        cfg = {
-            "data": {"max_gap_periods": 2},
-            "temporal": {"resolution": "weekly"},
-        }
+        data = DataConfig.model_validate(
+            {
+                "target_col": "price_eur_mwh",
+                "train_end": "2023-12-31",
+                "val_end": "2024-01-01",
+                "max_gap_periods": 2,
+            }
+        )
+        temporal = TemporalConfig(resolution="weekly")
         with caplog.at_level(logging.WARNING):
-            assert validate_entsoe_data(bad, cfg) is True
+            assert validate_entsoe_data(bad, data, temporal) is True
         assert "gap" in caplog.text.lower()
 
     def test_weekly_resolution_fillable_gap_no_warn(self, caplog):
@@ -443,12 +480,17 @@ class TestValidateEntsoeData:
             {"timestamp": timestamps, "price_eur_mwh": np.linspace(40, 60, 8)}
         )
         bad = df.drop(index=[3, 4]).reset_index(drop=True)
-        cfg = {
-            "data": {"max_gap_periods": 2},
-            "temporal": {"resolution": "weekly"},
-        }
+        data = DataConfig.model_validate(
+            {
+                "target_col": "price_eur_mwh",
+                "train_end": "2023-12-31",
+                "val_end": "2024-01-01",
+                "max_gap_periods": 2,
+            }
+        )
+        temporal = TemporalConfig(resolution="weekly")
         with caplog.at_level(logging.WARNING):
-            assert validate_entsoe_data(bad, cfg) is True
+            assert validate_entsoe_data(bad, data, temporal) is True
         assert "gap" not in caplog.text.lower()
 
     def test_outlier_detection_raises(self, sample_df, sample_config_stage2):
@@ -456,28 +498,39 @@ class TestValidateEntsoeData:
         bad = sample_df.copy()
         bad.loc[0, "price_eur_mwh"] = 10000.0
         with pytest.raises(ValueError, match="outlier"):
-            validate_entsoe_data(bad, sample_config_stage2)
+            validate_entsoe_data(
+                bad, sample_config_stage2.data, sample_config_stage2.temporal
+            )
 
     def test_duplicate_timestamps_raise(self, sample_df, sample_config_stage2):
         """Negative: duplicate timestamps raise ValueError."""
         bad = sample_df.copy()
         bad.loc[1, "timestamp"] = bad.loc[0, "timestamp"]
         with pytest.raises(ValueError, match="duplicate"):
-            validate_entsoe_data(bad, sample_config_stage2)
+            validate_entsoe_data(
+                bad, sample_config_stage2.data, sample_config_stage2.temporal
+            )
 
     def test_non_numeric_load_mw_raises(self, sample_df, sample_config_stage2):
         """Negative: non-numeric load_mw column raises ValueError."""
         bad = sample_df.copy()
         bad["load_mw"] = "not-a-number"
         with pytest.raises(ValueError, match="load_mw"):
-            validate_entsoe_data(bad, sample_config_stage2)
+            validate_entsoe_data(
+                bad, sample_config_stage2.data, sample_config_stage2.temporal
+            )
 
     def test_load_mw_with_nans_passes(self, sample_df, sample_config_stage2):
         """Positive: load_mw NaNs are allowed (gap-filling handles them)."""
         bad = sample_df.copy()
         bad["load_mw"] = 1500.0
         bad.loc[0, "load_mw"] = np.nan
-        assert validate_entsoe_data(bad, sample_config_stage2) is True
+        assert (
+            validate_entsoe_data(
+                bad, sample_config_stage2.data, sample_config_stage2.temporal
+            )
+            is True
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -715,18 +768,23 @@ class TestMainEmptyDataGuard:
     """
 
     @staticmethod
-    def _make_cfg(tmp_path):
-        """Build a minimal config dict for main() pointing at tmp_path."""
-        return {
-            "data": {
-                "raw_path": str(tmp_path / "raw"),
-                "entsoe": {
-                    "bidding_zone": "PSE",
-                    "start_date": "2024-01-01",
+    def _make_cfg(tmp_path) -> PipelineConfig:
+        """Build a minimal config for main() pointing at tmp_path."""
+        return PipelineConfig.model_validate(
+            {
+                "data": {
+                    "raw_path": str(tmp_path / "raw"),
+                    "target_col": "price_eur_mwh",
+                    "train_end": "2023-12-31",
+                    "val_end": "2024-01-01",
+                    "entsoe": {
+                        "bidding_zone": "PSE",
+                        "start_date": "2024-01-01",
+                    },
                 },
-            },
-            "temporal": {"resolution": "hourly"},
-        }
+                "model": {"type": "sklearn.dummy.DummyRegressor"},
+            }
+        )
 
     @staticmethod
     def _empty_df():
@@ -820,19 +878,25 @@ class TestMainResolutionGrid:
         daily_df = pd.DataFrame(
             {"timestamp": timestamps, "price_eur_mwh": np.linspace(40, 60, 10)}
         )
-        mock_load_config.return_value = {
-            "data": {
-                "raw_path": str(tmp_path / "raw"),
-                "max_gap_periods": 2,
-                "fill_method": "ffill",
-                "drop_long_gaps": True,
-                "entsoe": {
-                    "bidding_zone": "PSE",
-                    "start_date": "2024-01-01",
+        mock_load_config.return_value = PipelineConfig.model_validate(
+            {
+                "data": {
+                    "raw_path": str(tmp_path / "raw"),
+                    "target_col": "price_eur_mwh",
+                    "train_end": "2023-12-31",
+                    "val_end": "2024-01-01",
+                    "max_gap_periods": 2,
+                    "fill_method": "ffill",
+                    "drop_long_gaps": True,
+                    "entsoe": {
+                        "bidding_zone": "PSE",
+                        "start_date": "2024-01-01",
+                    },
                 },
-            },
-            "temporal": {"resolution": "daily"},
-        }
+                "temporal": {"resolution": "daily"},
+                "model": {"type": "sklearn.dummy.DummyRegressor"},
+            }
+        )
         mock_download.return_value = daily_df
 
         main()
@@ -871,19 +935,24 @@ class TestMainHashProvenance:
         SHA256 of the actual on-disk entsoe_prices.csv bytes, and the SHA256
         logged by save_raw_data must be the same value.
         """
-        mock_load_config.return_value = {
-            "data": {
-                "raw_path": str(tmp_path / "raw"),
-                "max_gap_periods": 2,
-                "fill_method": "ffill",
-                "drop_long_gaps": True,
-                "entsoe": {
-                    "bidding_zone": "PSE",
-                    "start_date": "2024-01-01",
+        mock_load_config.return_value = PipelineConfig.model_validate(
+            {
+                "data": {
+                    "raw_path": str(tmp_path / "raw"),
+                    "target_col": "price_eur_mwh",
+                    "train_end": "2023-12-31",
+                    "val_end": "2024-01-01",
+                    "max_gap_periods": 2,
+                    "fill_method": "ffill",
+                    "drop_long_gaps": True,
+                    "entsoe": {
+                        "bidding_zone": "PSE",
+                        "start_date": "2024-01-01",
+                    },
                 },
-            },
-            "temporal": {"resolution": "hourly"},
-        }
+                "model": {"type": "sklearn.dummy.DummyRegressor"},
+            }
+        )
         mock_download.return_value = generate_synthetic_data(n_hours=48)
 
         with caplog.at_level(logging.INFO, logger="src.ingestion.main"):

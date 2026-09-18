@@ -33,7 +33,7 @@ cfg = load_config()
 # Configure the *package* logger by explicit name (never `__name__` — the
 # uvicorn runner may set it to "__main__"). Package scope so sibling module
 # loggers (schemas, future validation) inherit handlers and level.
-setup_logging(cfg, logger_name="src.serving")
+setup_logging(cfg.logging, logger_name="src.serving")
 model = None
 model_version = "unknown"
 
@@ -55,16 +55,14 @@ async def lifespan(app: FastAPI):
     global model, model_version, cfg
     logger.info("Loading model from MLflow registry")
 
-    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI") or cfg["mlflow"][
-        "tracking_uri"
-    ]
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI") or cfg.mlflow.tracking_uri
     mlflow.set_tracking_uri(tracking_uri)
     logger.debug("MLflow tracking URI: %s", tracking_uri)
 
     # Retry with backoff so a briefly-unavailable MLflow server (e.g. during
     # container startup) doesn't leave the API permanently without a model.
-    model_name = cfg["mlflow"]["model_name"]
-    alias = cfg["serving"]["model_alias"]
+    model_name = cfg.mlflow.model_name
+    alias = cfg.serving.model_alias
     max_attempts = 5
     delay_seconds = 2
     for attempt in range(1, max_attempts + 1):
@@ -160,4 +158,4 @@ async def predict(request: PredictRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=cfg["serving"]["port"])
+    uvicorn.run(app, host="0.0.0.0", port=cfg.serving.port)

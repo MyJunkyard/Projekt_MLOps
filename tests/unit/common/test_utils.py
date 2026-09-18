@@ -1,6 +1,8 @@
 """
-Unit tests for the common package and config — setup_logging,
-compute_metrics, get_split_masks, and load_config.
+Unit tests for the common package — setup_logging, compute_metrics,
+and get_split_masks.
+
+Config loading/validation tests live in ``tests/unit/config/``.
 """
 
 import logging
@@ -9,36 +11,11 @@ from uuid import uuid4
 
 import numpy as np
 import pytest
-import yaml
 
 from src.common.logsetup import DEFAULT_LOG_FILE, setup_logging
 from src.common.metrics import compute_metrics
 from src.common.splits import get_split_masks
-from src.config import load_config
-
-
-# ---------------------------------------------------------------------------
-# load_config
-# ---------------------------------------------------------------------------
-class TestLoadConfig:
-    def test_load_config_returns_dict(self, tmp_path):
-        """Positive: valid YAML returns a dict."""
-        cfg_path = tmp_path / "params.yaml"
-        cfg_path.write_text("data:\n  target_col: price_eur_mwh\n")
-        result = load_config(str(cfg_path))
-        assert result == {"data": {"target_col": "price_eur_mwh"}}
-
-    def test_load_config_missing_file_raises(self, tmp_path):
-        """Negative: missing file raises FileNotFoundError."""
-        with pytest.raises(FileNotFoundError):
-            load_config(str(tmp_path / "does_not_exist.yaml"))
-
-    def test_load_config_invalid_yaml_raises(self, tmp_path):
-        """Negative: malformed YAML raises yaml.YAMLError."""
-        cfg_path = tmp_path / "bad.yaml"
-        cfg_path.write_text("data: [unclosed")
-        with pytest.raises(yaml.YAMLError):
-            load_config(str(cfg_path))
+from src.config.models import LoggingConfig
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +94,7 @@ class TestComputeMetrics:
 class TestGetSplitMasks:
     def test_split_masks_partition_all_rows(self, sample_df, sample_config):
         """Positive: masks are mutually exclusive and cover all rows."""
-        train, val, test = get_split_masks(sample_df, sample_config)
+        train, val, test = get_split_masks(sample_df, sample_config.data)
         assert train.sum() + val.sum() + test.sum() == len(sample_df)
         assert not (train & val).any()
         assert not (train & test).any()
@@ -125,7 +102,7 @@ class TestGetSplitMasks:
 
     def test_split_masks_boundaries(self, sample_df, sample_config):
         """Positive: rows before train_end are train; val_end onward are test."""
-        train, val, test = get_split_masks(sample_df, sample_config)
+        train, val, test = get_split_masks(sample_df, sample_config.data)
 
         # sample_df starts 2023-12-30, train_end 2023-12-31
         assert bool(train[0])
@@ -138,7 +115,7 @@ class TestGetSplitMasks:
 
     def test_split_masks_returns_boolean_arrays(self, sample_df, sample_config):
         """Positive: returned masks are boolean numpy arrays."""
-        train, val, test = get_split_masks(sample_df, sample_config)
+        train, val, test = get_split_masks(sample_df, sample_config.data)
         assert train.dtype == bool
         assert val.dtype == bool
         assert test.dtype == bool
@@ -165,9 +142,9 @@ class TestSetupLogging:
         """Positive: setup_logging adds a FileHandler mirroring log records."""
         log_file = tmp_path / "logs" / "pipeline.log"
         name = f"src_ph_{uuid4().hex}"
-        cfg = {"logging": {"level": "DEBUG", "file": str(log_file)}}
+        logging_cfg = LoggingConfig(level="DEBUG", file=str(log_file))
 
-        logger = setup_logging(cfg, logger_name=name)
+        logger = setup_logging(logging_cfg, logger_name=name)
         assert any(isinstance(h, logging.FileHandler) for h in logger.handlers)
 
         logging.getLogger(f"{name}.child").info("hello from file")
@@ -179,7 +156,7 @@ class TestSetupLogging:
     def test_default_file_in_tempdir(self):
         """Positive: with no logging.file, logs to DEFAULT_LOG_FILE in temp."""
         name = f"src_def_{uuid4().hex}"
-        setup_logging({}, logger_name=name)
+        setup_logging(LoggingConfig(), logger_name=name)
 
         logging.getLogger(f"{name}.child").info("default temp file check")
         self._flush(name)
@@ -189,10 +166,10 @@ class TestSetupLogging:
         assert "default temp file check" in default_file.read_text(encoding="utf-8")
 
     def test_custom_file_from_config(self, tmp_path):
-        """Positive: cfg['logging.file'] overrides DEFAULT_LOG_FILE."""
+        """Positive: logging.file overrides DEFAULT_LOG_FILE."""
         log_file = tmp_path / "custom" / "run.log"
         name = f"src_cus_{uuid4().hex}"
-        setup_logging({"logging": {"file": str(log_file)}}, logger_name=name)
+        setup_logging(LoggingConfig(file=str(log_file)), logger_name=name)
 
         logging.getLogger(f"{name}.child").warning("custom path check")
         self._flush(name)
@@ -207,11 +184,11 @@ class TestSetupLogging:
         name = f"src_idem_{uuid4().hex}"
 
         setup_logging(
-            {"logging": {"level": "DEBUG", "file": str(log_file)}},
+            LoggingConfig(level="DEBUG", file=str(log_file)),
             logger_name=name,
         )
         setup_logging(
-            {"logging": {"level": "INFO", "file": str(log_file)}},
+            LoggingConfig(level="INFO", file=str(log_file)),
             logger_name=name,
         )
 
@@ -222,9 +199,18 @@ class TestSetupLogging:
         assert len(file_handlers) == 1
         assert logger.level == logging.INFO
 
-    def test_missing_logging_section_falls_back_to_info(self):
-        """Minimal config (no logging section) falls back to INFO + a handler."""
+    def test_default_config_level_is_info(self):
+        """Default LoggingConfig resolves to INFO + a file handler."""
         name = f"src_min_{uuid4().hex}"
-        logger = setup_logging({}, logger_name=name)
+        logger = setup_logging(LoggingConfig(), logger_name=name)
         assert logger.level == logging.INFO
         assert any(isinstance(h, logging.FileHandler) for h in logger.handlers)
+
+    def test_level_case_insensitive(self, tmp_path):
+        """Positive: lowercase level names work (normalized by the model)."""
+        name = f"src_ci_{uuid4().hex}"
+        logging_cfg = LoggingConfig.model_validate(
+            {"level": "debug", "file": str(tmp_path / "ci.log")}
+        )
+        logger = setup_logging(logging_cfg, logger_name=name)
+        assert logger.level == logging.DEBUG

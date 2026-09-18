@@ -3,102 +3,86 @@ Shared pytest fixtures for the MLOps test suite.
 
 Fixtures provide small, deterministic, in-memory data and config so that
 tests do not rely on real configuration files or data artifacts.
+
+Config fixtures return validated ``PipelineConfig`` models (the type the
+pipeline code consumes); tests may mutate attributes on them freely —
+fixtures are function-scoped, so each test gets a fresh instance.
 """
 
 import numpy as np
 import pandas as pd
 import pytest
 
-
-@pytest.fixture
-def sample_config() -> dict:
-    """Small in-memory config dict mirroring params.yaml structure."""
-    return {
-        "data": {
-            "raw_path": "data/raw/",
-            "processed_path": "data/processed/features.parquet",
-            "reference_path": "data/reference/reference.parquet",
-            "target_col": "price_eur_mwh",
-            "date_col": "timestamp",
-            "train_end": "2023-12-31",
-            "val_end": "2024-01-01",
-        },
-        "temporal": {"resolution": "hourly", "horizon": 24},
-        "features": {
-            "calendar": {"enabled": True},
-            "lags": {"enabled": True, "periods": [1, 2, 24]},
-        },
-        "model": {
-            "type": "sklearn.dummy.DummyRegressor",
-            "params": {"strategy": "mean"},
-        },
-        "evaluation": {"primary_metric": "rmse", "metrics": ["rmse", "mae"]},
-        "mlflow": {
-            "tracking_uri": "http://localhost:5000",
-            "experiment_name": "energy-forecast",
-            "model_name": "energy-forecast-model",
-            "promote_to_production": True,
-            "champion_alias": "champion",
-        },
-        "serving": {"port": 8000, "model_alias": "champion"},
-    }
+from src.config.models import PipelineConfig
 
 
 @pytest.fixture
-def sample_config_stage2() -> dict:
+def sample_config() -> PipelineConfig:
+    """Minimal valid PipelineConfig; model defaults fill every other key."""
+    return PipelineConfig.model_validate(
+        {
+            "data": {
+                "target_col": "price_eur_mwh",
+                "train_end": "2023-12-31",
+                "val_end": "2024-01-01",
+            },
+            "features": {
+                "calendar": {"enabled": True},
+                "lags": {"enabled": True, "periods": [1, 2, 24]},
+            },
+            "model": {
+                "type": "sklearn.dummy.DummyRegressor",
+                "params": {"strategy": "mean"},
+            },
+            "evaluation": {"metrics": ["rmse", "mae"]},
+        }
+    )
+
+
+@pytest.fixture
+def sample_config_stage2() -> PipelineConfig:
     """Stage 2 config: XGBoost, lags enabled, holidays, full metrics."""
-    return {
-        "data": {
-            "raw_path": "data/raw/",
-            "processed_path": "data/processed/features.parquet",
-            "reference_path": "data/reference/reference.parquet",
-            "target_col": "price_eur_mwh",
-            "date_col": "timestamp",
-            "train_end": "2023-12-31",
-            "val_end": "2024-01-01",
-            "entsoe": {"bidding_zone": "PSE", "start_date": "2018-01-01"},
-        },
-        "temporal": {"resolution": "hourly", "horizon": 24},
-        "features": {
-            "calendar": {
-                "enabled": True,
-                "include": [
-                    "hour",
-                    "day_of_week",
-                    "month",
-                    "week_of_year",
-                    "is_holiday",
-                    "is_workday",
-                    "days_to_next_holiday",
-                    "days_since_last_holiday",
-                ],
+    return PipelineConfig.model_validate(
+        {
+            "data": {
+                "target_col": "price_eur_mwh",
+                "train_end": "2023-12-31",
+                "val_end": "2024-01-01",
+                "entsoe": {"bidding_zone": "PSE", "start_date": "2018-01-01"},
             },
-            "lags": {"enabled": True, "periods": [1, 2, 24]},
-            "derivatives": {"enabled": False, "order": [1, 2], "smooth_window": 3},
-        },
-        "model": {
-            "type": "xgboost.XGBRegressor",
-            "params": {
-                "n_estimators": 10,
-                "max_depth": 3,
-                "learning_rate": 0.1,
+            "features": {
+                "calendar": {
+                    "enabled": True,
+                    "include": [
+                        "hour",
+                        "day_of_week",
+                        "month",
+                        "week_of_year",
+                        "is_holiday",
+                        "is_workday",
+                        "days_to_next_holiday",
+                        "days_since_last_holiday",
+                    ],
+                },
+                "lags": {"enabled": True, "periods": [1, 2, 24]},
+                "derivatives": {"enabled": False, "order": [1, 2], "smooth_window": 3},
             },
-        },
-        "evaluation": {
-            "primary_metric": "rmse",
-            "metrics": ["rmse", "mae", "mape", "r2"],
-            "generate_plots": True,
-            "residual_breakdown": ["hour", "day_of_week", "month", "is_holiday"],
-        },
-        "mlflow": {
-            "tracking_uri": "http://localhost:5000",
-            "experiment_name": "energy-forecast",
-            "model_name": "energy-forecast-model",
-            "promote_to_production": True,
-            "champion_alias": "champion",
-        },
-        "serving": {"port": 8000, "model_alias": "champion"},
-    }
+            "model": {
+                "type": "xgboost.XGBRegressor",
+                "params": {
+                    "n_estimators": 10,
+                    "max_depth": 3,
+                    "learning_rate": 0.1,
+                },
+            },
+            "evaluation": {
+                "primary_metric": "rmse",
+                "metrics": ["rmse", "mae", "mape", "r2"],
+                "generate_plots": True,
+                "residual_breakdown": ["hour", "day_of_week", "month", "is_holiday"],
+            },
+        }
+    )
 
 
 @pytest.fixture

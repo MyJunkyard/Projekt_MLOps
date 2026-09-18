@@ -8,6 +8,8 @@ import logging
 
 import pandas as pd
 
+from src.config.models import DataConfig, TemporalConfig
+
 MODULE_LOGGER_NAME = "src.ingestion.validation"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
 
@@ -71,7 +73,9 @@ def validate_schema(df: pd.DataFrame) -> bool:
     return True
 
 
-def validate_entsoe_data(df: pd.DataFrame, cfg: dict) -> bool:
+def validate_entsoe_data(
+    df: pd.DataFrame, data: DataConfig, temporal: TemporalConfig
+) -> bool:
     """Validate ENTSO-E data for gaps, outliers, and timezone correctness.
 
     Required DataFrame contract:
@@ -94,10 +98,10 @@ def validate_entsoe_data(df: pd.DataFrame, cfg: dict) -> bool:
 
     Args:
         df: DataFrame to validate (contract above).
-        cfg: Configuration dict. ``data.max_gap_periods`` (default 2) sets the
-            gap threshold (in periods of ``temporal.resolution``);
-            ``temporal.resolution`` (default ``"hourly"``)
-            sets the expected data frequency.
+        data: ``DataConfig``; ``max_gap_periods`` sets the gap threshold
+            (in periods of the temporal resolution).
+        temporal: ``TemporalConfig``; ``resolution`` sets the expected
+            data frequency.
 
     Returns:
         True if all checks pass.
@@ -131,10 +135,10 @@ def validate_entsoe_data(df: pd.DataFrame, cfg: dict) -> bool:
     # Sort for gap detection
     df_sorted = df.sort_values("timestamp").reset_index(drop=True)
 
-    # Gap detection threshold derived from config; falls back to 2 if unset.
-    # Expected period duration comes from temporal.resolution.
-    max_gap_periods = cfg.get("data", {}).get("max_gap_periods", 2)
-    resolution = cfg.get("temporal", {}).get("resolution", "hourly")
+    # Gap detection threshold from config. Expected period duration comes
+    # from the temporal resolution.
+    max_gap_periods = data.max_gap_periods
+    resolution = temporal.resolution
     period_map = {
         "hourly": pd.Timedelta(hours=1),
         "daily": pd.Timedelta(days=1),
