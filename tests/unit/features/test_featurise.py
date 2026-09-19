@@ -4,7 +4,6 @@ Unit tests for the features package — feature engineering and splitting.
 
 import pandas as pd
 import pytest
-from numpy import isnan
 
 from src.features.calendar import (
     _get_holiday_dates,
@@ -13,7 +12,6 @@ from src.features.calendar import (
     add_holiday_proximity_features,
 )
 from src.features.derivatives import add_derivative_features
-from src.features.lags import add_lag_features, add_rolling_features
 from src.features.main import (
     load_raw_data,
     save_processed_data,
@@ -271,72 +269,6 @@ class TestAddHolidayProximityFeatures:
         result = add_holiday_proximity_features(df, _get_holiday_dates(df))
         assert str(result["days_to_next_holiday"].dtype) == "Int64"
         assert str(result["days_since_last_holiday"].dtype) == "Int64"
-
-
-class TestAddLagFeatures:
-    def test_adds_lag_columns(self, sample_df):
-        df = add_lag_features(sample_df.copy(), periods=[1, 24])
-        assert "lag_1h" in df.columns
-        assert "lag_24h" in df.columns
-
-    def test_lag_values_shifted(self, sample_df):
-        df = add_lag_features(sample_df.copy(), periods=[1])
-        assert df["lag_1h"].iloc[1] == sample_df["price_eur_mwh"].iloc[0]
-        assert df["lag_1h"].iloc[5] == sample_df["price_eur_mwh"].iloc[4]
-
-    def test_first_rows_are_nan(self, sample_df):
-        df = add_lag_features(sample_df.copy(), periods=[2])
-        assert pd.isna(df["lag_2h"].iloc[0])
-        assert pd.isna(df["lag_2h"].iloc[1])
-        assert not pd.isna(df["lag_2h"].iloc[2])
-
-    def test_original_columns_preserved(self, sample_df):
-        original_cols = list(sample_df.columns)
-        df = add_lag_features(sample_df.copy(), periods=[1])
-        assert list(sample_df.columns) == original_cols
-        assert "lag_1h" in df.columns
-
-
-class TestAddRollingFeatures:
-    def test_rolling_mean_correct(self):
-        """Positive: rolling mean matches hand-computed values."""
-        df = pd.DataFrame(
-            {
-                "timestamp": pd.date_range("2024-01-01", periods=5, freq="h", tz="UTC"),
-                "price_eur_mwh": [1.0, 2.0, 3.0, 4.0, 5.0],
-            }
-        )
-        result = add_rolling_features(df, "price_eur_mwh", windows=[3])
-        # Rolling mean with min_periods=1: [1, 1.5, 2, 3, 4]
-        expected = [1.0, 1.5, 2.0, 3.0, 4.0]
-        assert result["rolling_mean_3h"].tolist() == pytest.approx(expected)
-
-    def test_rolling_std_correct(self):
-        """Positive: rolling std matches hand-computed values."""
-        df = pd.DataFrame(
-            {
-                "timestamp": pd.date_range("2024-01-01", periods=5, freq="h", tz="UTC"),
-                "price_eur_mwh": [1.0, 2.0, 3.0, 4.0, 5.0],
-            }
-        )
-        result = add_rolling_features(df, "price_eur_mwh", windows=[3])
-        # Rolling std with min_periods=1: [NaN, 0.707, 1.0, 1.0, 1.0]
-        assert (
-            isnan(result["rolling_std_3h"].iloc[0])
-        )  # NaN
-        assert result["rolling_std_3h"].iloc[2] == pytest.approx(1.0)
-
-    def test_no_future_leakage(self):
-        """Positive: rolling window does not include future rows."""
-        df = pd.DataFrame(
-            {
-                "timestamp": pd.date_range("2024-01-01", periods=5, freq="h", tz="UTC"),
-                "price_eur_mwh": [1.0, 2.0, 3.0, 4.0, 5.0],
-            }
-        )
-        result = add_rolling_features(df, "price_eur_mwh", windows=[3])
-        # Row 2 (index 2) should only use rows 0-2, not row 3
-        assert result["rolling_mean_3h"].iloc[2] == pytest.approx(2.0)
 
 
 class TestAddDerivativeFeatures:

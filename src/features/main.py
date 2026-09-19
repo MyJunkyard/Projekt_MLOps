@@ -8,6 +8,7 @@ features package that knows the run order. Moved verbatim from
 """
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -15,7 +16,7 @@ import pandas as pd
 from src.common.logsetup import setup_logging
 from src.common.splits import get_split_masks
 from src.config import load_config
-from src.config.models import DataConfig
+from src.config.models import DataConfig, FeaturesConfig
 from src.features.calendar import (
     _get_holiday_dates,
     add_calendar_features,
@@ -28,6 +29,33 @@ from src.features.lags import add_lag_features, add_rolling_features
 # `"__main__"` and would bypass the configured src logger).
 MODULE_LOGGER_NAME = "src.features.main"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
+
+
+def _apply_step(
+    df: pd.DataFrame, label: str, fn: Callable[[pd.DataFrame], pd.DataFrame]
+) -> pd.DataFrame:
+    """Run one feature-group step with uniform logging.
+
+    Standard block mechanics for every group in ``build_features``: INFO-log
+    the step label, apply ``fn``, DEBUG-log exactly the columns it added.
+    The *dispatch* stays explicit per group (``if enabled`` blocks in run
+    order) — order is load-bearing for the no-leakage guarantee, so it is
+    kept visible rather than hidden in a registry. New groups (WS3/WS4)
+    add one standardized block in their documented position.
+
+    Args:
+        df: Input frame.
+        label: Human-readable step description, INFO-logged before running.
+        fn: Pure transformation applied to ``df``.
+
+    Returns:
+        The transformed DataFrame.
+    """
+    logger.info("Adding %s", label)
+    before = set(df.columns)
+    df = fn(df)
+    logger.debug("Added %s: %s", label, sorted(set(df.columns) - before))
+    return df
 
 
 def load_raw_data(path: str) -> pd.DataFrame:
@@ -133,6 +161,113 @@ def save_processed_data(
     )
 
 
+def build_features(
+    df: pd.DataFrame, features: FeaturesConfig, target_col: str
+) -> pd.DataFrame:
+    """Apply all enabled feature groups to the full frame (pre-split).
+
+    Pure transformation (no I/O): sorts by ``timestamp``, applies each
+    enabled feature group in run order, and drops rows left as NaN by
+    lag/derivative creation at the series start. The caller splits the
+    returned frame into train/val/test.
+
+    Lag/rolling features are computed here on the **full frame before
+    splitting** — the no-leakage ordering (see ``features.lags`` and
+    ``TestNoLeakageAcrossSplits``). Weather (WS3) and generation-mix
+    (WS4) merges land in this function, before the lag block.
+
+    Block convention: every group is an explicit ``if enabled`` block in
+    run order (order is load-bearing, kept visible) whose mechanics go
+    through ``_apply_step`` (uniform INFO/DEBUG logging with an exact
+    added-columns diff). New groups add one block in their documented
+    position — no registry, no dispatch indirection.
+
+    Args:
+        df: Raw DataFrame with ``timestamp`` and ``target_col`` columns.
+        features: ``FeaturesConfig`` with the per-group toggles/settings.
+        target_col: Name of the target column to derive lags, rolling
+            statistics, and derivatives from.
+
+    Returns:
+        The featurised DataFrame with no NaN rows.
+
+    Raises:
+        ValueError: If every row is dropped as NaN (e.g. the longest
+            configured lag period exceeds the available history).
+    """
+    # Sort by timestamp to ensure correct lag computation
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+    # Calendar features
+    if features.calendar.enabled:
+        # Build the holiday calendar once for the data's year range (padded
+        # by one year on each side) and share it across all holiday features
+        holidays = _get_holiday_dates(df)
+        df = _apply_step(
+            df,
+            "calendar features",
+            lambda d: add_calendar_features(d, holidays),
+        )
+        df = _apply_step(
+            df,
+            "holiday proximity features",
+            lambda d: add_holiday_proximity_features(d, holidays),
+        )
+
+    # Lag + rolling features
+    if features.lags.enabled:
+        periods = features.lags.periods
+        windows = features.lags.rolling_windows
+        df = _apply_step(
+            df,
+            f"lag features for periods: {periods}",
+            lambda d: add_lag_features(d, target_col, periods),
+        )
+        df = _apply_step(
+            df,
+            f"rolling features for windows: {windows}",
+            lambda d: add_rolling_features(d, target_col, windows),
+        )
+
+    # Derivative features
+    if features.derivatives.enabled:
+        order = features.derivatives.order
+        smooth_window = features.derivatives.smooth_window
+        df = _apply_step(
+            df,
+            f"derivative features (order={order}, smooth_window={smooth_window})",
+            lambda d: add_derivative_features(
+                d, target_col, order=order, smooth_window=smooth_window
+            ),
+        )
+
+    # Drop rows with NaN (from lag/derivative creation at start of series)
+    before = len(df)
+    df = df.dropna().reset_index(drop=True)
+    dropped = before - len(df)
+    if dropped > 0:
+        logger.info(
+            "Dropped %d rows with NaN from lag/derivative creation",
+            dropped,
+        )
+    if df.empty:
+        longest_lag = max(features.lags.periods) if features.lags.enabled else None
+        hint = (
+            f" The longest configured lag period is {longest_lag}h, which "
+            "exceeds the available history — shorten "
+            "features.lags.periods or provide more raw data."
+            if longest_lag is not None
+            else ""
+        )
+        raise ValueError(
+            "Feature engineering produced an empty DataFrame "
+            f"(dropped all {before} rows as NaN from lag/derivative "
+            f"creation).{hint}"
+        )
+
+    return df
+
+
 def main():
     """Orchestrate feature engineering pipeline."""
     cfg = load_config()
@@ -153,65 +288,8 @@ def main():
     logger.info("Loaded %s rows from %s", f"{len(df):,}", raw_path)
     logger.debug("Raw data columns: %s", list(df.columns))
 
-    # Sort by timestamp to ensure correct lag computation
-    df = df.sort_values("timestamp").reset_index(drop=True)
-
-    # Calendar features
-    if cfg.features.calendar.enabled:
-        logger.info("Adding calendar features")
-        # Build the holiday calendar once for the data's year range (padded
-        # by one year on each side) and share it across all holiday features
-        holidays = _get_holiday_dates(df)
-        df = add_calendar_features(df, holidays)
-        logger.debug(
-            "Added calendar features: hour, day_of_week, month, week_of_year, "
-            "is_holiday, is_workday"
-        )
-
-        # Holiday proximity features
-        logger.info("Adding holiday proximity features")
-        df = add_holiday_proximity_features(df, holidays)
-        logger.debug(
-            "Added holiday proximity features: days_to_next_holiday, "
-            "days_since_last_holiday"
-        )
-
-    # Lag features
-    if cfg.features.lags.enabled:
-        periods = cfg.features.lags.periods
-        logger.info("Adding lag features for periods: %s", periods)
-        df = add_lag_features(df, periods)
-
-        # Rolling features
-        logger.info("Adding rolling features")
-        df = add_rolling_features(df, cfg.data.target_col)
-        logger.debug(
-            "Added rolling features: rolling_mean_24h, rolling_std_24h, "
-            "rolling_mean_168h"
-        )
-
-    # Derivative features
-    if cfg.features.derivatives.enabled:
-        order = cfg.features.derivatives.order
-        smooth_window = cfg.features.derivatives.smooth_window
-        logger.info(
-            "Adding derivative features (order=%s, smooth_window=%d)",
-            order,
-            smooth_window,
-        )
-        df = add_derivative_features(
-            df, cfg.data.target_col, order=order, smooth_window=smooth_window
-        )
-
-    # Drop rows with NaN (from lag/derivative creation at start of series)
-    before = len(df)
-    df = df.dropna().reset_index(drop=True)
-    after = len(df)
-    if before - after > 0:
-        logger.info(
-            "Dropped %d rows with NaN from lag/derivative creation",
-            before - after,
-        )
+    logger.info("Engineering features")
+    df = build_features(df, cfg.features, cfg.data.target_col)
 
     logger.debug("Feature columns after engineering: %s", list(df.columns))
     logger.info("Splitting into train/val/test")

@@ -36,6 +36,7 @@ features:
   lags:
     enabled: true               # Stage 2: enable lag features
     periods: [1, 2, 3, 24, 48, 168]   # hours (168 = 1 week)
+    rolling_windows: [24, 168]  # trailing windows for rolling mean/std
   derivatives:
     enabled: false              # toggle for ablation experiments
     order: [1, 2]              # first and second derivative

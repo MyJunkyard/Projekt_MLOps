@@ -198,14 +198,22 @@ class WeatherConfig(_Strict):
 class LagsConfig(_Strict):
     """``features.lags`` — lag and rolling-window features.
 
-    ``rolling_windows`` is pre-provisioned for Workstream 2 (which adds
-    the key to ``params.yaml``); ``None`` keeps the current hardcoded
-    ``[24, 168]`` default in ``features.lags.add_rolling_features``.
+    ``periods`` are past offsets in native time steps (hours at hourly
+    resolution); ``rolling_windows`` are trailing window sizes over which
+    mean/std of the target are computed. Both lists are normalized to
+    unique sorted values at load time so the generated column order is
+    deterministic regardless of YAML order.
     """
 
     enabled: bool = False
     periods: list[PositiveInt] = [1, 2, 3, 24, 48, 168]
-    rolling_windows: list[PositiveInt] | None = None
+    rolling_windows: list[PositiveInt] = [24, 168]
+
+    @field_validator("periods", "rolling_windows")
+    @classmethod
+    def _unique_sorted(cls, v: list[int]) -> list[int]:
+        """Dedupe and sort: duplicate periods would rebuild the same column."""
+        return sorted(set(v))
 
 
 class DerivativesConfig(_Strict):

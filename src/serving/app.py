@@ -148,6 +148,9 @@ async def predict(request: PredictRequest):
             "is registered.",
         )
 
+    # TODO(Stage 5): at serving time, lag/rolling features must be computed
+    # from the store of recent actuals (or supplied by the client) — the
+    # model must never receive lags computed from future data.
     # Convert to DataFrame
     df = pd.DataFrame(request.features)
     logger.debug("Received prediction request with %d row(s)", len(df))

@@ -197,6 +197,30 @@ class TestPipelineConfigSchema:
 
 
 # ---------------------------------------------------------------------------
+# LagsConfig (Workstream 2)
+# ---------------------------------------------------------------------------
+class TestLagsConfig:
+    def test_rolling_windows_default(self):
+        """Positive: rolling windows default to [24, 168] when omitted."""
+        cfg = PipelineConfig.model_validate(_minimal_raw())
+        assert cfg.features.lags.rolling_windows == [24, 168]
+
+    def test_periods_deduped_and_sorted(self):
+        """Positive: duplicate/unsorted periods normalize to unique sorted."""
+        raw = _minimal_raw()
+        raw["features"] = {"lags": {"enabled": True, "periods": [168, 24, 24, 1]}}
+        cfg = PipelineConfig.model_validate(raw)
+        assert cfg.features.lags.periods == [1, 24, 168]
+
+    def test_non_positive_rolling_window_raises(self):
+        """Negative: rolling windows must be positive ints."""
+        raw = _minimal_raw()
+        raw["features"] = {"lags": {"enabled": True, "rolling_windows": [0, 24]}}
+        with pytest.raises(ValidationError):
+            PipelineConfig.model_validate(raw)
+
+
+# ---------------------------------------------------------------------------
 # Section models used directly by consumers
 # ---------------------------------------------------------------------------
 class TestSectionModels:

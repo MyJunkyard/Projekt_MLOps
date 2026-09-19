@@ -43,7 +43,7 @@ class TestEndToEndPipeline:
         loaded = loaded.sort_values("timestamp").reset_index(drop=True)
         holidays = _get_holiday_dates(loaded)
         loaded = add_calendar_features(loaded, holidays)
-        loaded = add_lag_features(loaded, [1, 2, 24])
+        loaded = add_lag_features(loaded, cfg.data.target_col, [1, 2, 24])
         loaded = loaded.dropna().reset_index(drop=True)
 
         train, val, test = train_val_test_split(loaded, cfg.data)
@@ -95,7 +95,7 @@ class TestEndToEndPipeline:
         loaded = loaded.sort_values("timestamp").reset_index(drop=True)
         holidays = _get_holiday_dates(loaded)
         loaded = add_calendar_features(loaded, holidays)
-        loaded = add_lag_features(loaded, [1, 2, 24])
+        loaded = add_lag_features(loaded, cfg.data.target_col, [1, 2, 24])
         loaded = loaded.dropna().reset_index(drop=True)
 
         train, val, test = train_val_test_split(loaded, cfg.data)

@@ -46,7 +46,7 @@ class TestIngestToFeaturise:
 
         if sample_config.features.lags.enabled:
             periods = sample_config.features.lags.periods
-            loaded = add_lag_features(loaded, periods)
+            loaded = add_lag_features(loaded, sample_config.data.target_col, periods)
 
         loaded = loaded.dropna().reset_index(drop=True)
 
@@ -80,7 +80,7 @@ class TestIngestToFeaturise:
         )
         holidays = _get_holiday_dates(loaded)
         loaded = add_calendar_features(loaded, holidays)
-        loaded = add_lag_features(loaded, [1, 2, 24])
+        loaded = add_lag_features(loaded, sample_config.data.target_col, [1, 2, 24])
         loaded = loaded.dropna().reset_index(drop=True)
 
         # First 24 rows dropped due to lag_24h NaN
@@ -129,8 +129,10 @@ class TestEntsoeToFeaturise:
 
         if cfg.features.lags.enabled:
             periods = cfg.features.lags.periods
-            loaded = add_lag_features(loaded, periods)
-            loaded = add_rolling_features(loaded, cfg.data.target_col)
+            loaded = add_lag_features(loaded, cfg.data.target_col, periods)
+            loaded = add_rolling_features(
+                loaded, cfg.data.target_col, cfg.features.lags.rolling_windows
+            )
 
         loaded = loaded.dropna().reset_index(drop=True)
 
