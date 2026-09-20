@@ -45,10 +45,24 @@ features:
     order: [1, 2]              # first and second derivative
     smooth_window: 3            # smoothing before differencing to reduce noise
   generation_mix:
-    enabled: false              # ENTSO-E generation by source
+    enabled: true               # ENTSO-E generation by source (WS4)
     sources: [wind, solar, coal, gas, nuclear, hydro]
   cross_border_flows:
     enabled: false
+  # Real-time publication lag (hours) per raw external column (WS4).
+  # The alignment block in build_features replaces each configured raw
+  # column with {col}_lag{L}h — the value actually known at prediction
+  # time — so training matches the deployed information set (no
+  # leakage). Every enabled generation source MUST have an entry here
+  # (validated at config load); load_mw has the same ~1h real-time lag.
+  availability_lags:
+    load_mw: 1
+    coal_mw: 1
+    gas_mw: 1
+    hydro_mw: 1
+    nuclear_mw: 1
+    solar_mw: 1
+    wind_mw: 1
 
 model:
   # Stage 2: XGBoost for real model

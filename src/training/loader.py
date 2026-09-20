@@ -1,20 +1,52 @@
 """
 training/loader.py — Dynamic model loading and feature-array loading.
 
-Moved verbatim from ``train.py`` (Workstream 0 module restructure).
+Feature-column selection (Workstream 4): when a
+``features_schema.json`` sidecar (written by the featurise stage next
+to ``features.parquet``) exists, feature columns come from its
+``role == FEATURE`` entries — the explicit, versioned metadata
+registry. Without the sidecar (pre-WS4 parquets), the loader falls
+back to the legacy "all non-timestamp, non-target columns" rule with a
+WARNING, so old artifacts keep working but the gap is visible.
 """
 
 import importlib
 import logging
 import subprocess
+from pathlib import Path
 
 import pandas as pd
 
+from src.common.schema import FeatureSchema, load_schema_or_none
 from src.common.splits import get_split_masks
 from src.config.models import DataConfig, ModelConfig
 
 MODULE_LOGGER_NAME = "src.training.loader"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
+
+
+def _feature_columns(features_path: str, target_col: str) -> list[str]:
+    """Resolve feature columns from the schema sidecar (legacy fallback).
+
+    Args:
+        features_path: Path to the features Parquet file.
+        target_col: Name of the target column.
+
+    Returns:
+        Feature column names in canonical order.
+    """
+    schema_path = Path(features_path).with_name("features_schema.json")
+    schema: FeatureSchema | None = load_schema_or_none(schema_path)
+    if schema is not None:
+        return schema.feature_names()
+    logger.warning(
+        "No feature schema sidecar at %s — falling back to 'all "
+        "non-timestamp, non-target columns' (pre-Workstream-4 parquet). "
+        "Re-run `python -m src featurise` to get the explicit schema.",
+        schema_path,
+    )
+    df = pd.read_parquet(features_path)
+    return [c for c in df.columns if c not in [target_col, "timestamp"]]
 
 
 def load_model(model_cfg: ModelConfig):
@@ -56,8 +88,8 @@ def load_features(path: str, data: DataConfig) -> tuple:
     target_col = data.target_col
     y = df[target_col].values
 
-    # Drop non-feature columns
-    feature_cols = [c for c in df.columns if c not in [target_col, "timestamp"]]
+    # Feature columns from the schema sidecar (legacy fallback inside)
+    feature_cols = _feature_columns(path, target_col)
     X = df[feature_cols].values
 
     # Reconstruct splits from the concatenated data using shared split logic
@@ -83,12 +115,10 @@ def get_feature_names(path: str, data: DataConfig) -> list[str]:
         data: ``DataConfig`` with ``target_col``.
 
     Returns:
-        A list of feature column names (excluding target and timestamp).
+        A list of feature column names (from the schema sidecar when
+        present; legacy all-non-timestamp/non-target fallback otherwise).
     """
-    df = pd.read_parquet(path)
-    target_col = data.target_col
-    feature_cols = [c for c in df.columns if c not in [target_col, "timestamp"]]
-    return feature_cols
+    return _feature_columns(path, data.target_col)
 
 
 def get_git_commit_hash() -> str:

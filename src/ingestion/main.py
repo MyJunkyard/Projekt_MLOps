@@ -11,7 +11,11 @@ from pathlib import Path
 
 from src.common.logsetup import setup_logging
 from src.config import load_config
-from src.ingestion.entsoe import download_entsoe_data, generate_synthetic_data
+from src.ingestion.entsoe import (
+    download_entsoe_data,
+    generate_synthetic_data,
+    ingest_generation_mix,
+)
 from src.ingestion.manifest import (
     SOURCE_ENTSOE,
     SOURCE_SYNTHETIC,
@@ -55,7 +59,11 @@ def main():
     except ValueError as e:
         logger.warning("ENTSO-E download unavailable: %s", e)
         logger.warning("Falling back to synthetic data generation")
-        df = generate_synthetic_data(include_load=cfg.data.entsoe.include_load)
+        df = generate_synthetic_data(
+            include_load=cfg.data.entsoe.include_load,
+            include_generation=cfg.features.generation_mix.enabled,
+            generation_sources=cfg.features.generation_mix.sources,
+        )
         logger.info("Generated %s synthetic rows", f"{len(df):,}")
         entsoe_source = SOURCE_SYNTHETIC
 
@@ -140,11 +148,33 @@ def main():
         source=entsoe_source,
     )
 
+    # Generation mix (Workstream 4): download-or-cache-hit per-source
+    # generation, then outer-join onto the main frame on timestamp (same
+    # pattern as load_mw) so the gap-filling stage handles coverage gaps.
+    # The raw {source}_mw columns are aligned to their availability lag
+    # by the featurise stage — they never become features unlagged.
+    run_sources = {"entsoe": entsoe_source}
+    if cfg.features.generation_mix.enabled:
+        logger.info(
+            "Fetching generation mix for sources: %s",
+            cfg.features.generation_mix.sources,
+        )
+        generation_df, generation_source = ingest_generation_mix(
+            cfg.features.generation_mix,
+            cfg.data.entsoe,
+            raw_path,
+            df["timestamp"].min(),
+            df["timestamp"].max(),
+        )
+        df = df.merge(generation_df, on="timestamp", how="outer")
+        run_sources["entsoe/generation"] = generation_source
+    else:
+        logger.debug("Generation mix disabled — skipping generation ingest")
+
     # Weather acquisition (Workstream 3, decisions D2/D3): ingest owns
     # all network I/O; featurise later reads the cache strictly offline.
     # The range comes from the frame just downloaded and validated, so
     # weather exactly covers the price data.
-    run_sources = {"entsoe": entsoe_source}
     if cfg.features.weather.enabled:
         logger.info(
             "Fetching weather for locations: %s", cfg.features.weather.locations

@@ -285,7 +285,7 @@ class TestLogToMlflow:
         mock_mlflow.log_param.assert_any_call("strategy", "mean")
         mock_mlflow.log_metric.assert_any_call("rmse", 1.0)
         mock_mlflow.log_metric.assert_any_call("mae", 0.5)
-        mock_mlflow.set_tag.assert_any_call("stage", "2")
+        mock_mlflow.set_tag.assert_any_call("stage", "3")
 
     @mock.patch(
         "src.training.registry.compute_params_hash", return_value="abc123"

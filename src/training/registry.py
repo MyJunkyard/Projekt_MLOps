@@ -129,6 +129,35 @@ def log_to_mlflow(
         if params_path.exists():
             mlflow.log_artifact(str(params_path), artifact_path="config")
 
+        # Log the raw-data manifest so runs link to an exact raw-data
+        # snapshot (Workstream 5), plus its own hash as a tag.
+        manifest_path = Path(cfg.data.raw_path) / "manifest.json"
+        if manifest_path.exists():
+            mlflow.log_artifact(str(manifest_path), artifact_path="config")
+            try:
+                manifest_sha = json.loads(
+                    manifest_path.read_text(encoding="utf-8")
+                ).get("sha256")
+                if manifest_sha:
+                    mlflow.set_tag("manifest_sha256", manifest_sha)
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Could not read %s: %s", manifest_path, exc)
+
+        # Log the feature schema sidecar (Workstream 4): the metadata
+        # registry describing every features.parquet column — the source
+        # of truth serving-time validation (WS6b) resolves at startup.
+        schema_path = Path(cfg.data.processed_path).with_name(
+            "features_schema.json"
+        )
+        if schema_path.exists():
+            mlflow.log_artifact(str(schema_path), artifact_path="config")
+        else:
+            logger.warning(
+                "No feature schema at %s — run `python -m src featurise` "
+                "(pre-Workstream-4 parquet?)",
+                schema_path,
+            )
+
         # Log metrics
         for name, value in metrics.items():
             mlflow.log_metric(name, value)
@@ -176,7 +205,7 @@ def log_to_mlflow(
 
         # Log tags
         mlflow.set_tag("git_commit", get_git_commit_hash())
-        mlflow.set_tag("stage", "2")
+        mlflow.set_tag("stage", "3")
 
         logger.debug("MLflow tracking URI: %s", cfg.mlflow.tracking_uri)
         logger.debug("MLflow experiment: %s", cfg.mlflow.experiment_name)

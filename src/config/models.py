@@ -78,6 +78,14 @@ WeatherVariable = Literal[
 #: ENTSO-E generation sources mapped to ``*_mw`` columns (Workstream 4).
 GenerationSource = Literal["wind", "solar", "coal", "gas", "nuclear", "hydro"]
 
+#: Raw external columns that may carry a real-time publication lag
+#: (Workstream 4): the actual load plus one ``{source}_mw`` column per
+#: generation source. ``features.availability_lags`` keys must come from
+#: this set so a typo fails at config load, not mid-run.
+RAW_EXTERNAL_COLUMNS: frozenset[str] = frozenset(
+    ["load_mw", *[f"{source}_mw" for source in get_args(GenerationSource)]]
+)
+
 TemporalResolution = Literal["hourly", "daily", "weekly"]
 
 FillMethod = Literal["ffill", "interpolate"]
@@ -233,7 +241,14 @@ class DerivativesConfig(_Strict):
 
 
 class GenerationMixConfig(_Strict):
-    """``features.generation_mix`` — ENTSO-E generation by source (WS4)."""
+    """``features.generation_mix`` — ENTSO-E generation by source (WS4).
+
+    The raw ``{source}_mw`` columns are acquired by ingest; the
+    availability alignment (``features.availability_lags``) turns them
+    into deployment-consistent ``{source}_mw_lag{L}h`` features — the
+    raw columns never reach ``features.parquet`` (see
+    ``features.main.build_features``).
+    """
 
     enabled: bool = False
     sources: list[GenerationSource] = [
@@ -244,6 +259,12 @@ class GenerationMixConfig(_Strict):
         "nuclear",
         "hydro",
     ]
+
+    @field_validator("sources")
+    @classmethod
+    def _unique_sorted(cls, v: list[str]) -> list[str]:
+        """Dedupe and sort: duplicate sources would rebuild the same column."""
+        return sorted(set(v))
 
 
 class CrossBorderFlowsConfig(_Strict):
@@ -257,6 +278,12 @@ class FeaturesConfig(_Strict):
 
     Every group defaults to *disabled*, so a minimal config yields no
     engineered features; ``params.yaml`` turns groups on explicitly.
+
+    ``availability_lags`` (Workstream 4) maps each raw external column
+    to its real-time publication lag in hours. The alignment block in
+    ``build_features`` replaces every configured raw column with
+    ``{col}_lag{L}h`` — the value actually known at prediction time —
+    so training matches the deployed information set (no leakage).
     """
 
     calendar: CalendarConfig = CalendarConfig()
@@ -265,6 +292,46 @@ class FeaturesConfig(_Strict):
     derivatives: DerivativesConfig = DerivativesConfig()
     generation_mix: GenerationMixConfig = GenerationMixConfig()
     cross_border_flows: CrossBorderFlowsConfig = CrossBorderFlowsConfig()
+    availability_lags: dict[str, PositiveInt] = {}
+
+    @field_validator("availability_lags")
+    @classmethod
+    def _keys_are_known_raw_columns(
+        cls, v: dict[str, int]
+    ) -> dict[str, int]:
+        """Lag keys must be known raw external columns (typo guard)."""
+        unknown = sorted(set(v) - RAW_EXTERNAL_COLUMNS)
+        if unknown:
+            raise ValueError(
+                f"features.availability_lags has unknown column(s) "
+                f"{unknown} — keys must be raw external columns "
+                f"(known: {sorted(RAW_EXTERNAL_COLUMNS)})"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _generation_sources_covered(self) -> "FeaturesConfig":
+        """Generation sources enabled for features must have a lag entry.
+
+        A ``{source}_mw`` column without an ``availability_lags`` entry
+        would flow into the feature matrix as a current-hour value —
+        exactly the deployment leakage this mechanism prevents — so the
+        omission fails at load time.
+        """
+        if self.generation_mix.enabled:
+            missing = sorted(
+                f"{source}_mw"
+                for source in self.generation_mix.sources
+                if f"{source}_mw" not in self.availability_lags
+            )
+            if missing:
+                raise ValueError(
+                    f"features.generation_mix is enabled but "
+                    f"features.availability_lags has no entry for "
+                    f"{missing} — every generation source must declare "
+                    "its real-time publication lag (>= 1 hour)."
+                )
+        return self
 
 
 class ModelConfig(_Strict):

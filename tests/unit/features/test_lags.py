@@ -173,11 +173,15 @@ class TestBuildFeatures:
     def test_lags_disabled_yields_no_lag_columns(self, sample_df, sample_config):
         """Positive: ``lags.enabled: false`` leaves no lag/rolling columns."""
         sample_config.features.lags.enabled = False
-        result = build_features(
+        result, schema = build_features(
             sample_df, sample_config.features, sample_config.data.target_col
         )
         assert not any(c.startswith("lag_") for c in result.columns)
         assert not any(c.startswith("rolling_") for c in result.columns)
+        # Schema metadata registry covers exactly the frame columns
+        assert schema.assert_matches_dataframe(result) is None
+        assert not schema.select(group="lag")
+        assert not schema.select(group="rolling")
 
     def test_lags_enabled_uses_configured_periods_and_windows(
         self, sample_df, sample_config
@@ -185,7 +189,7 @@ class TestBuildFeatures:
         """Positive: generated columns follow the config exactly."""
         sample_config.features.lags.periods = [1, 48]
         sample_config.features.lags.rolling_windows = [48]
-        result = build_features(
+        result, schema = build_features(
             sample_df, sample_config.features, sample_config.data.target_col
         )
         assert "lag_1h" in result.columns
@@ -194,11 +198,16 @@ class TestBuildFeatures:
         assert "rolling_std_48h" in result.columns
         assert "lag_24h" not in result.columns
         assert "rolling_mean_24h" not in result.columns
+        assert sorted(schema.select(group="lag")) == ["lag_1h", "lag_48h"]
+        assert sorted(schema.select(group="rolling")) == [
+            "rolling_mean_48h",
+            "rolling_std_48h",
+        ]
 
     def test_sorts_unsorted_input(self, sample_df, sample_config):
         """Positive: row order does not affect the output frame."""
         shuffled = sample_df.sample(frac=1.0, random_state=7).reset_index(drop=True)
-        result = build_features(
+        result, _ = build_features(
             shuffled, sample_config.features, sample_config.data.target_col
         )
         assert result["timestamp"].is_monotonic_increasing
@@ -249,7 +258,7 @@ class TestBuildFeaturesWeather:
         """Positive: ``weather.enabled: false`` adds no weather columns."""
         sample_config.features.weather.enabled = False
         weather = {"warsaw": _weather_frame()}
-        result = build_features(
+        result, _ = build_features(
             sample_df,
             sample_config.features,
             sample_config.data.target_col,
@@ -262,7 +271,7 @@ class TestBuildFeaturesWeather:
         sample_config.features.weather.enabled = True
         weather = {"warsaw": _weather_frame()}
         df = _hourly_frame(n=400)  # long enough for the configured windows
-        result = build_features(
+        result, schema = build_features(
             df,
             sample_config.features,
             sample_config.data.target_col,
@@ -270,6 +279,10 @@ class TestBuildFeaturesWeather:
         )
         assert "warsaw__temperature_2m" in result.columns
         assert "warsaw__wind_speed_100m" in result.columns
+        assert sorted(schema.select(group="weather")) == [
+            "warsaw__temperature_2m",
+            "warsaw__wind_speed_100m",
+        ]
 
     def test_enabled_without_data_raises(self, sample_df, sample_config):
         """Negative: enabled flag with no weather frames fails fast (D4)."""
@@ -302,7 +315,7 @@ class TestNoLeakageAcrossSplits:
     def test_split_boundary_lags_match_preceding_actuals(self):
         """Positive: first val/test rows lag the true preceding targets."""
         cfg = _lags_only_config(periods=[1, 24], windows=[24])
-        featured = build_features(
+        featured, _ = build_features(
             _hourly_frame(), cfg.features, cfg.data.target_col
         )
         _, val, test = train_val_test_split(featured, cfg.data)
@@ -320,7 +333,7 @@ class TestNoLeakageAcrossSplits:
     def test_split_boundary_rolling_spans_preceding_actuals(self):
         """Positive: first val row's rolling mean covers pre-split rows."""
         cfg = _lags_only_config(periods=[1], windows=[24])
-        featured = build_features(
+        featured, _ = build_features(
             _hourly_frame(), cfg.features, cfg.data.target_col
         )
         _, val, _ = train_val_test_split(featured, cfg.data)
@@ -333,7 +346,7 @@ class TestNoLeakageAcrossSplits:
     def test_no_nan_lag_values_after_split(self):
         """Positive: every split row has complete lag values (pre-split fill)."""
         cfg = _lags_only_config(periods=[1, 2, 24], windows=[24, 168])
-        featured = build_features(
+        featured, _ = build_features(
             _hourly_frame(), cfg.features, cfg.data.target_col
         )
         train, val, test = train_val_test_split(featured, cfg.data)

@@ -148,9 +148,14 @@ async def predict(request: PredictRequest):
             "is registered.",
         )
 
-    # TODO(Stage 5): at serving time, lag/rolling features must be computed
-    # from the store of recent actuals (or supplied by the client) — the
-    # model must never receive lags computed from future data.
+    # TODO(Stage 5): at serving time, lag/rolling features AND the
+    # availability-lagged externals (load_mw_lag1h, {source}_mw_lag{L}h —
+    # see features.availability_lags) must be computed from the store of
+    # recent actuals (or supplied by the client) — the model must never
+    # receive lags computed from future data. The champion run's
+    # feature_schema.json artifact (logged by training/registry.py)
+    # declares which columns carry availability_lag_hours > 0 and must
+    # be sourced from recent actuals.
     # Convert to DataFrame
     df = pd.DataFrame(request.features)
     logger.debug("Received prediction request with %d row(s)", len(df))
