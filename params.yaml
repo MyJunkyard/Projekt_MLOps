@@ -31,8 +31,11 @@ features:
                days_to_next_holiday, days_since_last_holiday]
   weather:
     enabled: false              # toggle for ablation experiments
-    variables: [temperature_2m, wind_speed_100m, shortwave_radiation, cloud_cover]
+    variables: [temperature_2m, wind_speed_100m, shortwave_radiation, cloud_cover,
+                precipitation]
     locations: [warsaw, krakow, gdansk, wroclaw]
+    allow_synthetic: false      # explicit opt-in: synthetic weather on download failure
+                                # (mixed real+synthetic runs are rejected at ingest)
   lags:
     enabled: true               # Stage 2: enable lag features
     periods: [1, 2, 3, 24, 48, 168]   # hours (168 = 1 week)

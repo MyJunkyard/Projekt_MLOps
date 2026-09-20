@@ -167,7 +167,13 @@ class CalendarConfig(_Strict):
 
 
 class WeatherConfig(_Strict):
-    """``features.weather`` — Open-Meteo weather features (Workstream 3)."""
+    """``features.weather`` — Open-Meteo weather features (Workstream 3).
+
+    ``allow_synthetic`` gates the synthetic weather fallback explicitly
+    (Workstream 3, decision D7): synthetic weather is never generated
+    silently — with the default ``false``, a failed download raises, and
+    the featurise stage refuses a synthetic-marked cache.
+    """
 
     enabled: bool = False
     variables: list[WeatherVariable] = [
@@ -175,8 +181,10 @@ class WeatherConfig(_Strict):
         "wind_speed_100m",
         "shortwave_radiation",
         "cloud_cover",
+        "precipitation",
     ]
     locations: list[str] = ["warsaw"]
+    allow_synthetic: bool = False
 
     @field_validator("locations")
     @classmethod

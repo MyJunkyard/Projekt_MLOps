@@ -50,6 +50,7 @@ dependencies = [
     "evidently>=0.4,<0.7",
     "entsoe-py>=0.10",
     "workalendar>=17.0",
+    "requests>=2.31",
     "xgboost>=2.0",
     "matplotlib>=3.8",
 ]

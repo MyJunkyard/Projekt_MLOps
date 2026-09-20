@@ -230,6 +230,68 @@ class TestBuildFeatures:
             build_features(tiny, sample_config.features, sample_config.data.target_col)
 
 
+def _weather_frame(n=72, start="2023-06-01"):
+    """Deterministic hourly weather frame (tz-aware UTC) for one location."""
+    timestamps = pd.date_range(start=start, periods=n, freq="h", tz="UTC")
+    return pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "temperature_2m": np.linspace(10.0, 20.0, num=n),
+            "wind_speed_100m": np.linspace(2.0, 8.0, num=n),
+        }
+    )
+
+
+class TestBuildFeaturesWeather:
+    """Weather merge gating in ``build_features`` (Workstream 3, D4)."""
+
+    def test_disabled_yields_no_weather_columns(self, sample_df, sample_config):
+        """Positive: ``weather.enabled: false`` adds no weather columns."""
+        sample_config.features.weather.enabled = False
+        weather = {"warsaw": _weather_frame()}
+        result = build_features(
+            sample_df,
+            sample_config.features,
+            sample_config.data.target_col,
+            weather=weather,
+        )
+        assert not any("__" in c for c in result.columns)
+
+    def test_enabled_merges_location_suffixed_columns(self, sample_config):
+        """Positive: enabled merge adds ``{location}__{variable}`` columns."""
+        sample_config.features.weather.enabled = True
+        weather = {"warsaw": _weather_frame()}
+        df = _hourly_frame(n=400)  # long enough for the configured windows
+        result = build_features(
+            df,
+            sample_config.features,
+            sample_config.data.target_col,
+            weather=weather,
+        )
+        assert "warsaw__temperature_2m" in result.columns
+        assert "warsaw__wind_speed_100m" in result.columns
+
+    def test_enabled_without_data_raises(self, sample_df, sample_config):
+        """Negative: enabled flag with no weather frames fails fast (D4)."""
+        sample_config.features.weather.enabled = True
+        with pytest.raises(ValueError, match="no weather data was supplied"):
+            build_features(
+                sample_df, sample_config.features, sample_config.data.target_col
+            )
+
+    def test_enabled_missing_location_raises(self, sample_df, sample_config):
+        """Negative: enabled flag with a location frame missing fails fast."""
+        sample_config.features.weather.enabled = True
+        sample_config.features.weather.locations = ["warsaw", "krakow"]
+        with pytest.raises(ValueError, match="krakow"):
+            build_features(
+                sample_df,
+                sample_config.features,
+                sample_config.data.target_col,
+                weather={"warsaw": _weather_frame()},
+            )
+
+
 class TestNoLeakageAcrossSplits:
     """Regression: lags/rollings must be computed pre-split (full frame).
 

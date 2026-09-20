@@ -24,6 +24,7 @@ from src.features.calendar import (
 )
 from src.features.derivatives import add_derivative_features
 from src.features.lags import add_lag_features, add_rolling_features
+from src.ingestion.weather import load_weather_cache, merge_weather
 
 # Stable module name (not `__name__` — under `python -m` it becomes
 # `"__main__"` and would bypass the configured src logger).
@@ -162,7 +163,10 @@ def save_processed_data(
 
 
 def build_features(
-    df: pd.DataFrame, features: FeaturesConfig, target_col: str
+    df: pd.DataFrame,
+    features: FeaturesConfig,
+    target_col: str,
+    weather: dict[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """Apply all enabled feature groups to the full frame (pre-split).
 
@@ -173,8 +177,9 @@ def build_features(
 
     Lag/rolling features are computed here on the **full frame before
     splitting** — the no-leakage ordering (see ``features.lags`` and
-    ``TestNoLeakageAcrossSplits``). Weather (WS3) and generation-mix
-    (WS4) merges land in this function, before the lag block.
+    ``TestNoLeakageAcrossSplits``). The weather merge (WS3) lands in
+    this function, before the lag block; the generation-mix merge
+    (WS4) will take the same position.
 
     Block convention: every group is an explicit ``if enabled`` block in
     run order (order is load-bearing, kept visible) whose mechanics go
@@ -187,13 +192,20 @@ def build_features(
         features: ``FeaturesConfig`` with the per-group toggles/settings.
         target_col: Name of the target column to derive lags, rolling
             statistics, and derivatives from.
+        weather: Optional per-location weather frames (``timestamp`` +
+            float variable columns), keyed by location name. Required
+            when ``features.weather.enabled`` is true; the caller loads
+            them from the cache (never the network — decision D2).
 
     Returns:
         The featurised DataFrame with no NaN rows.
 
     Raises:
-        ValueError: If every row is dropped as NaN (e.g. the longest
-            configured lag period exceeds the available history).
+        ValueError: If ``features.weather.enabled`` is true but no
+            weather data was supplied, if a configured location is
+            missing from ``weather``, or if every row is dropped as NaN
+            (e.g. the longest configured lag period exceeds the
+            available history).
     """
     # Sort by timestamp to ensure correct lag computation
     df = df.sort_values("timestamp").reset_index(drop=True)
@@ -213,6 +225,31 @@ def build_features(
             "holiday proximity features",
             lambda d: add_holiday_proximity_features(d, holidays),
         )
+
+    # Weather features (Workstream 3): merge before the lag block so the
+    # no-leakage ordering is preserved. One standardized block per
+    # location; the merge itself normalizes both join keys to naive UTC.
+    if features.weather.enabled:
+        if not weather:
+            raise ValueError(
+                "features.weather.enabled is true but no weather data was "
+                "supplied — load the weather cache in features.main() and "
+                "pass it as `weather`."
+            )
+        for location in features.weather.locations:
+            if location not in weather:
+                raise ValueError(
+                    f"features.weather.locations includes {location!r} but "
+                    "no weather frame was supplied for it — check the "
+                    "cache load in features.main()."
+                )
+            df = _apply_step(
+                df,
+                f"weather features for {location}",
+                lambda d, loc=location, frame=weather[location]: merge_weather(
+                    d, frame, loc
+                ),
+            )
 
     # Lag + rolling features
     if features.lags.enabled:
@@ -288,8 +325,31 @@ def main():
     logger.info("Loaded %s rows from %s", f"{len(df):,}", raw_path)
     logger.debug("Raw data columns: %s", list(df.columns))
 
+    # Weather (Workstream 3): the ingest stage owns all network I/O and
+    # persists the per-location cache (decision D2); featurise only reads
+    # it — never the network.
+    weather: dict[str, pd.DataFrame] | None = None
+    if cfg.features.weather.enabled:
+        logger.info(
+            "Loading weather cache for locations: %s",
+            cfg.features.weather.locations,
+        )
+        weather = {
+            location: load_weather_cache(
+                cfg.data.raw_path,
+                location,
+                df["timestamp"].min(),
+                df["timestamp"].max(),
+                cfg.features.weather.variables,
+                allow_synthetic=cfg.features.weather.allow_synthetic,
+            )
+            for location in cfg.features.weather.locations
+        }
+    else:
+        logger.debug("Weather features disabled — no weather merge")
+
     logger.info("Engineering features")
-    df = build_features(df, cfg.features, cfg.data.target_col)
+    df = build_features(df, cfg.features, cfg.data.target_col, weather=weather)
 
     logger.debug("Feature columns after engineering: %s", list(df.columns))
     logger.info("Splitting into train/val/test")

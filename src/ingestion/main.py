@@ -12,8 +12,15 @@ from pathlib import Path
 from src.common.logsetup import setup_logging
 from src.config import load_config
 from src.ingestion.entsoe import download_entsoe_data, generate_synthetic_data
-from src.ingestion.manifest import save_raw_data, write_manifest
+from src.ingestion.manifest import (
+    SOURCE_ENTSOE,
+    SOURCE_SYNTHETIC,
+    ensure_consistent_sources,
+    save_raw_data,
+    write_manifest,
+)
 from src.ingestion.validation import fill_gaps, validate_entsoe_data
+from src.ingestion.weather import ingest_weather
 
 # Stable module name (not `__name__` — under `python -m` it is `"__main__"`
 # and would bypass the configured src logger).
@@ -36,16 +43,21 @@ def main():
 
     logger.info("Stage: ingestion")
 
-    # Try to download real data; fall back to synthetic if no API key
+    # Try to download real data; fall back to synthetic if no API key.
+    # The source is recorded in the manifest so runs are auditable and
+    # the source-consistency gate below can reject real/synthetic mixes
+    # (Workstream 3, decision D7).
     try:
         logger.info("Attempting ENTSO-E data download")
         df = download_entsoe_data(cfg.data.entsoe)
         logger.info("Downloaded %s rows from ENTSO-E", f"{len(df):,}")
+        entsoe_source = SOURCE_ENTSOE
     except ValueError as e:
         logger.warning("ENTSO-E download unavailable: %s", e)
         logger.warning("Falling back to synthetic data generation")
         df = generate_synthetic_data(include_load=cfg.data.entsoe.include_load)
         logger.info("Generated %s synthetic rows", f"{len(df):,}")
+        entsoe_source = SOURCE_SYNTHETIC
 
     # Guard against empty data (review point 4): a successful download can
     # still return zero rows (e.g. no data in the requested date range),
@@ -119,9 +131,40 @@ def main():
     csv_hash = save_raw_data(df, str(output_path))
 
     # Write manifest — includes imputation/drop stats (review point 1b)
+    # and the provenance source (Workstream 3, decision D7)
     write_manifest(
-        raw_path, df, sha256_hash=csv_hash, imputation_stats=imputation_stats
+        raw_path,
+        df,
+        sha256_hash=csv_hash,
+        imputation_stats=imputation_stats,
+        source=entsoe_source,
     )
+
+    # Weather acquisition (Workstream 3, decisions D2/D3): ingest owns
+    # all network I/O; featurise later reads the cache strictly offline.
+    # The range comes from the frame just downloaded and validated, so
+    # weather exactly covers the price data.
+    run_sources = {"entsoe": entsoe_source}
+    if cfg.features.weather.enabled:
+        logger.info(
+            "Fetching weather for locations: %s", cfg.features.weather.locations
+        )
+        _, weather_sources = ingest_weather(
+            cfg.features.weather,
+            raw_path,
+            df["timestamp"].min(),
+            df["timestamp"].max(),
+        )
+        run_sources.update(
+            {f"weather/{loc}": src for loc, src in weather_sources.items()}
+        )
+    else:
+        logger.debug("Weather features disabled — skipping weather ingest")
+
+    # Source-consistency gate (decision D7): all-synthetic runs are a
+    # valid offline mode; any real+synthetic mix poisons training and is
+    # rejected outright.
+    ensure_consistent_sources(run_sources)
 
     logger.info("Ingestion complete")
 

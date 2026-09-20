@@ -15,12 +15,21 @@ import pandas as pd
 MODULE_LOGGER_NAME = "src.ingestion.manifest"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
 
+#: Provenance ``source`` values recorded in manifests (Workstream 3,
+#: decision D7). ``"synthetic"`` marks generated substitute data; a run
+#: mixing synthetic with real sources is rejected (see
+#: :func:`ensure_consistent_sources`).
+SOURCE_ENTSOE = "entsoe"
+SOURCE_OPEN_METEO = "open-meteo"
+SOURCE_SYNTHETIC = "synthetic"
+
 
 def write_manifest(
     raw_path: str,
     df: pd.DataFrame,
     sha256_hash: str | None = None,
     imputation_stats: dict | None = None,
+    source: str | None = None,
 ) -> None:
     """Write a data manifest JSON file with download metadata.
 
@@ -40,6 +49,9 @@ def write_manifest(
         imputation_stats: Optional dict with imputation statistics
             (``n_imputed``, ``n_unfilled``, ``max_gap_periods``,
             ``fill_method``, ``freq``).
+        source: Optional provenance tag (``SOURCE_ENTSOE`` /
+            ``SOURCE_OPEN_METEO`` / ``SOURCE_SYNTHETIC``) recorded as the
+            manifest's ``source`` field (Workstream 3, decision D7).
     """
     path_obj = Path(raw_path)
     path_obj.mkdir(parents=True, exist_ok=True)
@@ -59,6 +71,9 @@ def write_manifest(
         "sha256": sha256_hash,
     }
 
+    if source:
+        manifest["source"] = source
+
     if imputation_stats:
         manifest["n_imputed_rows"] = imputation_stats.get("n_imputed", 0)
         manifest["n_dropped_rows"] = imputation_stats.get("n_dropped_rows", 0)
@@ -77,6 +92,39 @@ def write_manifest(
         json.dump(manifest, f, indent=2)
 
     logger.info("Manifest written to %s", manifest_path)
+
+
+def ensure_consistent_sources(sources: dict[str, str]) -> None:
+    """Reject runs that mix real and synthetic data sources.
+
+    Policy (Workstream 3, decision D7): an all-synthetic run is a valid
+    offline mode (tests, explicit offline dev runs); mixing synthetic
+    with real data would train on fabricated correlations and is refused
+    outright.
+
+    Args:
+        sources: Mapping of dataset name (e.g. ``"entsoe"``,
+            ``"weather/warsaw"``) to its manifest ``source`` value.
+
+    Raises:
+        RuntimeError: If at least one dataset is synthetic and at least
+            one is real.
+    """
+    synthetic = sorted(
+        name for name, value in sources.items() if value == SOURCE_SYNTHETIC
+    )
+    real = sorted(
+        name for name, value in sources.items() if value != SOURCE_SYNTHETIC
+    )
+    if synthetic and real:
+        raise RuntimeError(
+            "Run mixes real and synthetic data sources — refusing to "
+            f"continue. synthetic: {synthetic}; real: {real}. Fix the "
+            "failing download, or explicitly allow synthetic data for the "
+            "affected dataset (e.g. features.weather.allow_synthetic) so "
+            "the whole run is consistent."
+        )
+    logger.debug("Data sources consistent: %s", sources)
 
 
 def save_raw_data(df: pd.DataFrame, path: str) -> str:

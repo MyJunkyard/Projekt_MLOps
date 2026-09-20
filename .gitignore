@@ -16,6 +16,7 @@ venv/
 
 # Data files (raw CSVs are large, keep only .gitkeep)
 data/raw/*.csv
+data/raw/weather/*.csv
 data/processed/*.parquet
 data/reference/*.parquet
 
