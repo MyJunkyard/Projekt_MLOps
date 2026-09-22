@@ -3,6 +3,7 @@ Unit tests for the training package — model loading, feature loading, git hash
 MLflow logging, baselines, params hash, feature importances.
 """
 
+import json
 import subprocess
 from unittest import mock
 
@@ -130,6 +131,18 @@ class TestComputeParamsHash:
     def test_missing_file_returns_unknown(self, tmp_path):
         """Negative: missing file returns 'unknown'."""
         assert compute_params_hash(str(tmp_path / "nope.yaml")) == "unknown"
+
+    def test_stable_hash_for_identical_bytes(self, tmp_path):
+        """Positive: identical bytes yield identical hashes; distinct bytes differ."""
+        a = tmp_path / "same_a.yaml"
+        b = tmp_path / "same_b.yaml"
+        c = tmp_path / "diff.yaml"
+        content = "data:\n  target_col: price_eur_mwh\n"
+        a.write_text(content)
+        b.write_text(content)
+        c.write_text("data:\n  target_col: load_mw\n")
+        assert compute_params_hash(str(a)) == compute_params_hash(str(b))
+        assert compute_params_hash(str(a)) != compute_params_hash(str(c))
 
 
 class TestLogFeatureImportances:
@@ -444,3 +457,84 @@ class TestLogToMlflowPromotion:
         assert any(
             "set as 'champion' alias" in record.message for record in caplog.records
         )
+
+
+class TestLogToMlflowProvenance:
+    """Workstream 5: every run links to an exact raw-data snapshot.
+
+    Pins ``log_to_mlflow`` to:
+    - log ``data/raw/manifest.json`` as a ``config/`` artifact, and
+    - set a ``manifest_sha256`` tag from the manifest's own ``sha256`` field,
+    with graceful handling when the manifest is absent or malformed.
+    Reuses the mocking pattern of ``TestLogToMlflowPromotion``.
+    """
+
+    FAKE_SHA = "f" * 64
+
+    def _wire_up(self, mock_mlflow, mock_log_model, sample_config, tmp_path):
+        """Configure run/launcher mocks and point raw_path at the temp dir."""
+        sample_config.data.raw_path = str(tmp_path)
+        mock_run = mock.MagicMock()
+        mock_run.info.run_id = "run-provenance"
+        mock_mlflow.start_run.return_value.__enter__.return_value = mock_run
+        mock_mlflow.MlflowClient.return_value = mock.MagicMock()
+        mock_log_model.return_value = mock.MagicMock(registered_model_version=None)
+
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
+    def test_logs_manifest_artifact(
+        self, mock_mlflow, mock_log_model, sample_config, tmp_path
+    ):
+        """Positive: manifest.json is logged as a config artifact."""
+        self._wire_up(mock_mlflow, mock_log_model, sample_config, tmp_path)
+        manifest = tmp_path / "manifest.json"
+        manifest.write_text(json.dumps({"sha256": self.FAKE_SHA, "row_count": 1}))
+
+        log_to_mlflow(mock.MagicMock(), {"rmse": 1.0}, sample_config)
+
+        mock_mlflow.log_artifact.assert_any_call(
+            str(manifest), artifact_path="config"
+        )
+
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
+    def test_manifest_sha256_tag(
+        self, mock_mlflow, mock_log_model, sample_config, tmp_path
+    ):
+        """Positive: the manifest's sha256 is recorded as a run tag."""
+        self._wire_up(mock_mlflow, mock_log_model, sample_config, tmp_path)
+        manifest = tmp_path / "manifest.json"
+        manifest.write_text(json.dumps({"sha256": self.FAKE_SHA}))
+
+        log_to_mlflow(mock.MagicMock(), {"rmse": 1.0}, sample_config)
+
+        mock_mlflow.set_tag.assert_any_call("manifest_sha256", self.FAKE_SHA)
+
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
+    def test_omits_manifest_tag_when_absent(
+        self, mock_mlflow, mock_log_model, sample_config, tmp_path
+    ):
+        """Negative: no manifest on disk -> no manifest_sha256 tag, run still logs."""
+        self._wire_up(mock_mlflow, mock_log_model, sample_config, tmp_path)
+
+        log_to_mlflow(mock.MagicMock(), {"rmse": 1.0}, sample_config)
+
+        set_tag_names = [call[0][0] for call in mock_mlflow.set_tag.call_args_list]
+        assert "manifest_sha256" not in set_tag_names
+
+    @mock.patch("src.training.registry.log_model")
+    @mock.patch("src.training.registry.mlflow")
+    def test_malformed_manifest_skipped(
+        self, mock_mlflow, mock_log_model, sample_config, tmp_path, caplog
+    ):
+        """Negative: malformed manifest.json is skipped with a warning, no crash."""
+        self._wire_up(mock_mlflow, mock_log_model, sample_config, tmp_path)
+        (tmp_path / "manifest.json").write_text("{not valid json")
+
+        with caplog.at_level("WARNING", logger="src.training.registry"):
+            log_to_mlflow(mock.MagicMock(), {"rmse": 1.0}, sample_config)
+
+        set_tag_names = [call[0][0] for call in mock_mlflow.set_tag.call_args_list]
+        assert "manifest_sha256" not in set_tag_names
+        assert "Could not read" in caplog.text
