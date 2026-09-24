@@ -116,6 +116,7 @@ class EntsoeConfig(_Strict):
     bidding_zone: str = "PSE"
     start_date: date = date(2018, 1, 1)
     include_load: bool = True
+    allow_synthetic: bool = False
 
 
 class DataConfig(_Strict):

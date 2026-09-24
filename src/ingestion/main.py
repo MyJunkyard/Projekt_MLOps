@@ -57,12 +57,24 @@ def main():
         logger.info("Downloaded %s rows from ENTSO-E", f"{len(df):,}")
         entsoe_source = SOURCE_ENTSOE
     except ValueError as e:
+        if not cfg.data.entsoe.allow_synthetic:
+            raise RuntimeError(
+                "ENTSO-E download unavailable (missing ENTSOE_API_KEY). "
+                "Provide the key for real data, or set "
+                "data.entsoe.allow_synthetic: true explicitly for offline "
+                "dev/CI runs — never for production training: fabricated "
+                "data must not reach a model silently."
+            ) from e
         logger.warning("ENTSO-E download unavailable: %s", e)
-        logger.warning("Falling back to synthetic data generation")
+        logger.warning(
+            "SYNTHETIC price/load data — not valid for real training runs"
+        )
+        # The fallback mirrors download_entsoe_data's output only
+        # (timestamp + price + load). Generation has its own step below
+        # (ingest_generation_mix); generating it here too would duplicate
+        # {source}_mw on the merge (wind_mw_x / wind_mw_y suffixes).
         df = generate_synthetic_data(
             include_load=cfg.data.entsoe.include_load,
-            include_generation=cfg.features.generation_mix.enabled,
-            generation_sources=cfg.features.generation_mix.sources,
         )
         logger.info("Generated %s synthetic rows", f"{len(df):,}")
         entsoe_source = SOURCE_SYNTHETIC
@@ -81,6 +93,35 @@ def main():
             "date range). Check data.entsoe.start_date / bidding_zone or "
             "API availability."
         )
+
+    # Generation mix (Workstream 4): download-or-cache-hit per-source
+    # generation, then outer-join onto the main frame on timestamp
+    # (same pattern as load_mw, which the download merges). This runs
+    # BEFORE validation and gap-filling so the {source}_mw columns are
+    # validated, gap-filled, and persisted in entsoe_prices.csv with
+    # the price frame — merging after save (the original ordering)
+    # left them only in memory, so featurise never saw them and the
+    # availability-lagged {source}_mw_lag{L}h features could never be
+    # built (caught by the WS6a contract tests). The raw {source}_mw
+    # columns are aligned to their availability lag by the featurise
+    # stage — they never become features unlagged.
+    run_sources = {"entsoe": entsoe_source}
+    if cfg.features.generation_mix.enabled:
+        logger.info(
+            "Fetching generation mix for sources: %s",
+            cfg.features.generation_mix.sources,
+        )
+        generation_df, generation_source = ingest_generation_mix(
+            cfg.features.generation_mix,
+            cfg.data.entsoe,
+            raw_path,
+            df["timestamp"].min(),
+            df["timestamp"].max(),
+        )
+        df = df.merge(generation_df, on="timestamp", how="outer")
+        run_sources["entsoe/generation"] = generation_source
+    else:
+        logger.debug("Generation mix disabled — skipping generation ingest")
 
     # Validate
     logger.debug("Data columns: %s", list(df.columns))
@@ -113,6 +154,15 @@ def main():
     if cfg.data.drop_long_gaps:
         before = len(df)
         df = df.dropna().reset_index(drop=True)
+        if df.empty:
+            raise ValueError(
+                f"All {before} rows were dropped as NaN after imputation — "
+                "at least one data column has no values for any row (e.g. a "
+                "generation source the ENTSO-E data does not cover, or a gap "
+                "longer than max_gap_periods spanning the whole range). Fix "
+                "the source coverage or drop the column from "
+                "features.generation_mix.sources."
+            )
         n_dropped = before - len(df)
         if n_dropped > 0:
             logger.warning(
@@ -147,29 +197,6 @@ def main():
         imputation_stats=imputation_stats,
         source=entsoe_source,
     )
-
-    # Generation mix (Workstream 4): download-or-cache-hit per-source
-    # generation, then outer-join onto the main frame on timestamp (same
-    # pattern as load_mw) so the gap-filling stage handles coverage gaps.
-    # The raw {source}_mw columns are aligned to their availability lag
-    # by the featurise stage — they never become features unlagged.
-    run_sources = {"entsoe": entsoe_source}
-    if cfg.features.generation_mix.enabled:
-        logger.info(
-            "Fetching generation mix for sources: %s",
-            cfg.features.generation_mix.sources,
-        )
-        generation_df, generation_source = ingest_generation_mix(
-            cfg.features.generation_mix,
-            cfg.data.entsoe,
-            raw_path,
-            df["timestamp"].min(),
-            df["timestamp"].max(),
-        )
-        df = df.merge(generation_df, on="timestamp", how="outer")
-        run_sources["entsoe/generation"] = generation_source
-    else:
-        logger.debug("Generation mix disabled — skipping generation ingest")
 
     # Weather acquisition (Workstream 3, decisions D2/D3): ingest owns
     # all network I/O; featurise later reads the cache strictly offline.

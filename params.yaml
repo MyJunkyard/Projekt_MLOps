@@ -16,6 +16,9 @@ data:
     start_date: "2018-01-01"
     include_load: true            # also download actual load and store as load_mw column
     # ENTSO-E API key is read from env var ENTSOE_API_KEY
+    allow_synthetic: false        # offline opt-in: substitute synthetic
+                                 # price/load when the key is missing
+                                 # (D7 policy; never production training)
 
 temporal:
   resolution: hourly            # hourly | daily | weekly

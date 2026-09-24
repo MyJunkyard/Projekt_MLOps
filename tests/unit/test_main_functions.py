@@ -20,7 +20,7 @@ from src.config.models import PipelineConfig
 class TestIngestMain:
     @mock.patch("src.ingestion.main.load_config")
     def test_main_runs_pipeline(self, mock_load_config, tmp_path, sample_df):
-        """Positive: ingest.main() generates, validates, and saves data."""
+        """Positive: ingest.main() processes, validates, and saves data."""
         raw_dir = tmp_path / "raw"
         mock_load_config.return_value = PipelineConfig.model_validate(
             {
@@ -35,7 +35,7 @@ class TestIngestMain:
         )
 
         with mock.patch(
-            "src.ingestion.main.generate_synthetic_data", return_value=sample_df
+            "src.ingestion.main.download_entsoe_data", return_value=sample_df
         ):
             ingest_mod.main()
 

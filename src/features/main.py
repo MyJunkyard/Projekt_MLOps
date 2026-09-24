@@ -180,11 +180,12 @@ def load_raw_data(path: str) -> pd.DataFrame:
         path: Path to the raw CSV file.
 
     Returns:
-        A DataFrame with ``timestamp`` parsed as datetime (tz-naive —
-        pandas parses ISO UTC timestamps to naive datetimes here) and
+        A DataFrame with ``timestamp`` parsed as tz-aware UTC datetime
+        (explicitly normalized via ``pd.to_datetime(..., utc=True)``) and
         the remaining columns as written by ingest.
     """
-    df = pd.read_csv(path, parse_dates=["timestamp"])
+    df = pd.read_csv(path)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df
 
 

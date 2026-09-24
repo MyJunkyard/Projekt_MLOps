@@ -409,6 +409,10 @@ class TestMergeWeather:
         assert len(merged) == len(price)
         assert "warsaw__temperature_2m" in merged.columns
         assert "warsaw__wind_speed_100m" in merged.columns
+        # The merge normalizes both join keys to tz-aware UTC (decision D5),
+        # so the output timestamp is always tz-aware even when the price
+        # frame was tz-naive — this is required by get_split_masks downstream.
+        assert str(merged["timestamp"].dt.tz) == "UTC"
         # First-hour values matched (join aligned the naive/aware keys).
         assert merged["warsaw__temperature_2m"].iloc[0] == pytest.approx(
             weather["temperature_2m"].iloc[0]

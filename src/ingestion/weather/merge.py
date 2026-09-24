@@ -2,7 +2,7 @@
 ingestion/weather/merge.py — UTC-safe weather merge into the price frame.
 
 Alignment layer between acquisition and featurisation (Workstream 3,
-decisions D5/D6/D9/D10): normalizes both join keys to naive UTC instants,
+decisions D5/D6/D9/D10): normalizes both join keys to tz-aware UTC,
 renames weather columns to the ``{location}__{variable}`` contract, and
 left-joins one location's weather onto the price frame.
 """
@@ -23,15 +23,20 @@ MODULE_LOGGER_NAME = "src.ingestion.weather.merge"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
 
 
-def _as_utc_naive(series: pd.Series) -> pd.Series:
-    """Normalize a datetime Series to tz-naive UTC instants.
+def _as_utc_aware(series: pd.Series) -> pd.Series:
+    """Normalize a datetime Series to tz-aware UTC.
 
-    Both the featurise input frame (parsed from CSV, tz-naive) and the
-    weather frames (tz-aware UTC) collapse to the same representation so
-    the join key is unambiguous (decision D5). Naive values are assumed
-    to already be UTC (project convention — no DST handling).
+    Both the featurise input frame (parsed from CSV, tz-aware UTC) and the
+    weather frames (tz-aware UTC internally) are normalized to a single
+    representation so the join key is unambiguous (decision D5, revised).
+    Naive values are assumed to already be UTC (project convention — no DST
+    handling) and are localized to UTC. The output is always tz-aware UTC,
+    consistent with the rest of the pipeline (``get_split_masks`` in
+    ``common/splits.py`` requires tz-aware timestamps) and with the schema
+    declaration in ``features.main._base_specs``
+    (``datetime64[ns, UTC]``).
     """
-    return pd.to_datetime(series, utc=True).dt.tz_localize(None)
+    return pd.to_datetime(series, utc=True)
 
 
 def merge_weather(
@@ -69,7 +74,7 @@ def merge_weather(
         )
 
     weather = weather_df.copy()
-    weather["timestamp"] = _as_utc_naive(weather["timestamp"])
+    weather["timestamp"] = _as_utc_aware(weather["timestamp"])
     if weather["timestamp"].duplicated().any():
         duplicates = weather.loc[
             weather["timestamp"].duplicated(), "timestamp"
@@ -88,7 +93,7 @@ def merge_weather(
     weather_columns = [c for c in weather.columns if c != "timestamp"]
 
     price = price_df.copy()
-    price["timestamp"] = _as_utc_naive(price["timestamp"])
+    price["timestamp"] = _as_utc_aware(price["timestamp"])
     # many_to_one: each price hour matches at most one weather hour — a
     # final guard against duplicated weather keys corrupting the frame.
     merged = price.merge(
