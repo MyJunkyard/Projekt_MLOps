@@ -98,6 +98,15 @@ mlflow:
 serving:
   port: 8000
   model_alias: champion         # alias of the model registry version to load
+  validation:
+    max_rows: 1000
+    ranges:
+      hour: [0, 23]
+      day_of_week: [0, 6]
+      month: [1, 12]
+      week_of_year: [1, 53]
+      is_holiday: [0, 1]
+      is_workday: [0, 1]
 
 logging:
   level: INFO                   # DEBUG | INFO | WARNING | ERROR

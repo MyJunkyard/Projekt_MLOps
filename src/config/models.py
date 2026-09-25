@@ -386,11 +386,31 @@ class MlflowConfig(_Strict):
     run_tags: dict[str, str] = {}
 
 
+class ServingValidationConfig(_Strict):
+    """Serving request limits and generic feature bounds."""
+
+    max_rows: PositiveInt = 1000
+    ranges: dict[str, tuple[float, float]] = {}
+
+    @field_validator("ranges")
+    @classmethod
+    def _valid_ranges(
+        cls, value: dict[str, tuple[float, float]]
+    ) -> dict[str, tuple[float, float]]:
+        for name, bounds in value.items():
+            if not name or len(bounds) != 2 or bounds[0] > bounds[1]:
+                raise ValueError(
+                    f"invalid serving validation range for {name!r}: {bounds!r}"
+                )
+        return value
+
+
 class ServingConfig(_Strict):
-    """``serving`` — HTTP API settings (deep validation arrives in WS6b)."""
+    """``serving`` — HTTP API settings and request-validation policy."""
 
     port: PositiveInt = 8000
     model_alias: str = "champion"
+    validation: ServingValidationConfig = ServingValidationConfig()
 
 
 class LoggingConfig(_Strict):

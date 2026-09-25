@@ -20,8 +20,14 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 
 from src.common.logsetup import setup_logging
+from src.common.schema import FeatureSchema
 from src.config import load_config
 from src.serving.schemas import PredictRequest, PredictResponse
+from src.serving.validation import (
+    PredictionInputError,
+    load_feature_schema,
+    validate_feature_rows,
+)
 
 # Stable module name (not `__name__` — the FastAPI/uvicorn runner sets it to
 # `"__main__"` or another name, which would bypass the configured src logger).
@@ -36,6 +42,7 @@ cfg = load_config()
 setup_logging(cfg.logging, logger_name="src.serving")
 model = None
 model_version = "unknown"
+feature_schema: FeatureSchema | None = None
 
 
 @asynccontextmanager
@@ -52,7 +59,7 @@ async def lifespan(app: FastAPI):
     Yields:
         None. Control is yielded to the application while it runs.
     """
-    global model, model_version, cfg
+    global model, model_version, feature_schema, cfg
     logger.info("Loading model from MLflow registry")
 
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI") or cfg.mlflow.tracking_uri
@@ -75,6 +82,19 @@ async def lifespan(app: FastAPI):
             client = mlflow.MlflowClient()
             version_info = client.get_model_version_by_alias(model_name, alias)
             model_version = version_info.version
+            feature_schema = load_feature_schema(version_info.run_id)
+            if feature_schema is None:
+                logger.warning(
+                    "Model %s has no usable feature schema; /predict will "
+                    "skip feature-name validation",
+                    model_version,
+                )
+            else:
+                logger.info(
+                    "Loaded feature schema with %d feature(s) for model %s",
+                    len(feature_schema.feature_names()),
+                    model_version,
+                )
             logger.info("Model loaded successfully (version: %s)", model_version)
             break
         except Exception as e:
@@ -148,6 +168,19 @@ async def predict(request: PredictRequest):
             "is registered.",
         )
 
+    try:
+        expected_names = (
+            feature_schema.feature_names() if feature_schema is not None else None
+        )
+        canonical_names = validate_feature_rows(
+            request.features,
+            expected_names,
+            cfg.serving.validation.max_rows,
+            cfg.serving.validation.ranges,
+        )
+    except PredictionInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     # TODO(Stage 5): at serving time, lag/rolling features AND the
     # availability-lagged externals (load_mw_lag1h, {source}_mw_lag{L}h —
     # see features.availability_lags) must be computed from the store of
@@ -158,6 +191,8 @@ async def predict(request: PredictRequest):
     # be sourced from recent actuals.
     # Convert to DataFrame
     df = pd.DataFrame(request.features)
+    if canonical_names is not None:
+        df = df.reindex(columns=canonical_names)
     logger.debug("Received prediction request with %d row(s)", len(df))
     predictions = model.predict(df)
 

@@ -8,10 +8,11 @@ from pydantic import BaseModel
 
 
 class PredictRequest(BaseModel):
-    """Request body for /predict endpoint.
+    """Request body for ``/predict``.
 
-    Accepts a list of feature dictionaries.
-    No validation yet — added in Stage 3.
+    ``features`` is a list of JSON objects. The serving validator applies
+    the model-specific schema and numeric/policy checks after pydantic
+    parses this envelope.
     """
     features: list[dict]
 
