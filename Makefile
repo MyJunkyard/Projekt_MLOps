@@ -16,7 +16,7 @@
 # commands.
 # =============================================================================
 
-.PHONY: ingest featurise train evaluate serve test compare all up down clean
+.PHONY: ingest featurise train evaluate serve test lint compare all up down clean
 
 # --- Pipeline steps (run locally, need MLflow running in Docker) ---
 
@@ -50,10 +50,14 @@ compare:
 	@echo "Navigate to: http://localhost:5000"
 	@docker compose exec mlflow mlflow models list || true
 
-# --- Testing ---
+# --- Testing and static analysis ---
 
 test:
 	pytest tests/ -v
+
+lint:
+	ruff check src/ tests/
+	mypy
 
 # --- Full pipeline ---
 

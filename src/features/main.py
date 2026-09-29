@@ -65,7 +65,11 @@ _META_COLUMNS = frozenset({"timestamp", "is_imputed"})
 
 
 def _apply_step(
-    df: pd.DataFrame, label: str, fn: Callable[[pd.DataFrame], pd.DataFrame]
+    df: pd.DataFrame,
+    label: str,
+    fn: Callable[..., pd.DataFrame],
+    *args: Any,
+    **kwargs: Any,
 ) -> pd.DataFrame:
     """Run one feature-group step with uniform logging.
 
@@ -84,7 +88,7 @@ def _apply_step(
     """
     logger.info("Adding %s", label)
     before = set(df.columns)
-    df = fn(df)
+    df = fn(df, *args, **kwargs)
     logger.debug("Added %s: %s", label, sorted(set(df.columns) - before))
     return df
 
@@ -371,9 +375,9 @@ def _run_availability(
         df = _apply_step(
             df,
             f"availability alignment for {raw_col} (lag {lag_hours}h)",
-            lambda d, col=raw_col, lag=lag_hours: align_availability(
-                d, col, lag
-            ),
+            align_availability,
+            raw_col,
+            lag_hours,
         )
         # The raw column no longer exists — its base declaration must go,
         # or the final drift guard would flag a declared-but-absent column.
@@ -407,12 +411,13 @@ def _run_weather(
                 "no weather frame was supplied for it — check the "
                 "cache load in features.main()."
             )
+        location_frame = weather[location]
         df = _apply_step(
             df,
             f"weather features for {location}",
-            lambda d, loc=location, frame=weather[location]: merge_weather(
-                d, frame, loc
-            ),
+            merge_weather,
+            location_frame,
+            location,
         )
         _declare_new_columns(
             df, declared, "weather", f"weather variable for {location}"
@@ -590,7 +595,7 @@ def build_features(
     return df, schema
 
 
-def main():
+def main() -> None:
     """Orchestrate feature engineering pipeline."""
     cfg = load_config()
     # Configure the *package* logger by explicit name (never `__name__` —

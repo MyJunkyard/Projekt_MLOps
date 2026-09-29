@@ -52,20 +52,20 @@ def load_feature_schema(
                 Path(artifact_root) / "config" / "features_schema.json",
                 Path(artifact_root) / "features_schema.json",
             )
-            path = next(
+            local_path = next(
                 (candidate for candidate in candidates if candidate.exists()), None
             )
-            if path is None:
+            if local_path is None:
                 logger.warning("Feature schema not found under %s", artifact_root)
                 return None
-            return FeatureSchema.from_file(path)
+            return FeatureSchema.from_file(local_path)
 
         client = mlflow.MlflowClient()
-        path = client.download_artifacts(
-            run_id=run_id,
-            artifact_path="config/features_schema.json",
+        remote_path = client.download_artifacts(
+            run_id,
+            "config/features_schema.json",
         )
-        return FeatureSchema.from_file(path)
+        return FeatureSchema.from_file(remote_path)
     except Exception as exc:  # metadata must never prevent API startup
         logger.warning(
             "Could not load feature schema for run %s: %s; "
@@ -105,7 +105,7 @@ def validate_feature_rows(
     rows: Sequence[Mapping[str, Any]],
     expected_names: Sequence[str] | None,
     max_rows: int,
-    ranges: Mapping[str, Sequence[Real]] | None = None,
+    ranges: Mapping[str, Sequence[float]] | None = None,
 ) -> list[str] | None:
     """Validate and normalize prediction rows.
 

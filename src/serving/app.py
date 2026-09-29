@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI):
             client = mlflow.MlflowClient()
             version_info = client.get_model_version_by_alias(model_name, alias)
             model_version = version_info.version
-            feature_schema = load_feature_schema(version_info.run_id)
+            feature_schema = load_feature_schema(str(version_info.run_id))
             if feature_schema is None:
                 logger.warning(
                     "Model %s has no usable feature schema; /predict will "

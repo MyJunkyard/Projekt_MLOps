@@ -111,5 +111,5 @@ class TestLoadFeatureSchema:
         client.return_value.download_artifacts.return_value = str(artifact)
         assert load_feature_schema("champion-run") == schema
         client.return_value.download_artifacts.assert_called_once_with(
-            run_id="champion-run", artifact_path="config/features_schema.json"
+            "champion-run", "config/features_schema.json"
         )

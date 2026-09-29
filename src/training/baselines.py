@@ -23,7 +23,7 @@ class PersistenceModel:
     for time-series forecasting.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.last_value: float = 0.0
 
     def fit(
@@ -70,7 +70,7 @@ class SeasonalNaiveModel:
     predicts them cyclically. This captures weekly seasonality.
     """
 
-    def __init__(self, season_length: int = 168):
+    def __init__(self, season_length: int = 168) -> None:
         self.season_length = season_length
         self.history: np.ndarray = np.array([])
 

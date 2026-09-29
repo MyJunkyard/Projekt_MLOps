@@ -35,7 +35,7 @@ MODULE_LOGGER_NAME = "src.evaluation.main"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
 
 
-def main():
+def main() -> None:
     """Orchestrate evaluation: metrics, plots, and residual breakdown."""
     cfg = load_config()
     # Configure the *package* logger by explicit name (never `__name__` —

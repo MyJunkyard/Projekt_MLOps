@@ -25,16 +25,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from entsoe import EntsoePandasClient as EntsoeClient
 
 from src.config.models import EntsoeConfig, GenerationMixConfig
 from src.ingestion.manifest import SOURCE_ENTSOE, SOURCE_SYNTHETIC, save_raw_data
-
-# ENTSoE client: entsoe-py >= 0.10 renamed the client to `EntsoeClient`;
-# earlier versions used `EntsoePandasClient`. Support both.
-try:
-    from entsoe import EntsoeClient
-except ImportError:
-    from entsoe import EntsoePandasClient as EntsoeClient  # type: ignore
 
 # Stable module name (not `__name__` — under `python -m` it is `"__main__"`
 # and would bypass the configured src logger).
