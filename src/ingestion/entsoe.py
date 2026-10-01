@@ -2,7 +2,7 @@
 ingestion/entsoe.py — ENTSO-E data acquisition.
 
 Downloads day-ahead prices, actual load, and actual generation per type
-for the Polish (PSE) bidding zone from the ENTSO-E Transparency Platform
+for the Polish (PL) bidding zone from the ENTSO-E Transparency Platform
 via the entsoe-py client. Falls back to synthetic data generation when
 no API key is available.
 
@@ -51,6 +51,120 @@ PSR_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
 _GENERATION_CACHE_DIR_NAME = "entsoe/generation"
 _GENERATION_CSV_NAME = "generation.csv"
 _GENERATION_MANIFEST_NAME = "manifest.json"
+
+
+class InvalidBiddingZoneError(ValueError):
+    """Configured ``data.entsoe.bidding_zone`` is not a valid ENTSO-E Area.
+
+    Subclasses ``ValueError`` so existing ``except ValueError`` fallback
+    paths keep matching, while letting callers distinguish a config error
+    (must never fall back to synthetic data) from a missing API key via
+    ``except InvalidBiddingZoneError`` before the generic handler.
+    """
+
+
+class MissingApiKeyError(ValueError):
+    """No usable ENTSO-E API key found for the current runtime.
+
+    Subclasses ``ValueError`` so existing ``except ValueError`` handlers
+    keep matching, while letting callers trigger the synthetic-data
+    fallback *only* for this cause. Query/network failures raise plain
+    ``ValueError`` and must never fall back to synthetic data — silently
+    fabricating training data on a transient outage would poison runs.
+
+    Single key source per runtime (no dual lookup): Docker Compose sets
+    ``ENTSOE_API_TOKEN_FILE`` and the key is read from that secret file;
+    local runs set ``ENTSOE_API_KEY`` and the key is read from the env
+    var. Setting both at once is a configuration error and raises.
+    """
+
+
+def _read_api_key() -> str:
+    """Read the ENTSO-E API key from the single configured source.
+
+    Single key source per runtime (no dual lookup): Docker Compose sets
+    ``ENTSOE_API_TOKEN_FILE`` and the key is read from that secret file;
+    local runs set ``ENTSOE_API_KEY`` and the key is read from the env
+    var. Setting both at once is a configuration error.
+
+    The key itself is never logged — only its source is reported at DEBUG.
+
+    Returns:
+        The stripped API key, or an empty string when neither
+        ``ENTSOE_API_KEY`` nor ``ENTSOE_API_TOKEN_FILE`` yields one.
+
+    Raises:
+        ValueError: If both sources are set at once, or if
+            ``ENTSOE_API_TOKEN_FILE`` points to an unreadable file.
+    """
+    env_key = os.environ.get("ENTSOE_API_KEY", "").strip()
+    secret_path = os.environ.get("ENTSOE_API_TOKEN_FILE", "").strip()
+    if env_key and secret_path:
+        logger.error(
+            "Both ENTSOE_API_KEY and ENTSOE_API_TOKEN_FILE are set; "
+            "configure exactly one key source"
+        )
+        raise ValueError(
+            "Both ENTSOE_API_KEY and ENTSOE_API_TOKEN_FILE are set — "
+            "configure exactly one ENTSO-E API key source."
+        )
+    if secret_path:
+        try:
+            api_key = Path(secret_path).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            logger.error("Unable to read ENTSOE secret file: %s", secret_path)
+            raise ValueError(
+                f"Unable to read ENTSOE secret file: {secret_path}"
+            ) from exc
+        if api_key:
+            logger.debug("Using ENTSO-E API key from secret file %s", secret_path)
+            return api_key
+        logger.debug("ENTSOE secret file %s is empty", secret_path)
+        return ""
+    if env_key:
+        logger.debug("Using ENTSO-E API key from ENTSOE_API_KEY env var")
+        return env_key
+    logger.debug("No ENTSO-E API key in env and no secret file configured")
+    return ""
+
+
+def _resolve_bidding_zone(zone: str) -> str:
+    """Validate the configured zone against the bundled Area enum.
+
+    This is the authoritative gate: ``entsoe.mappings.Area`` ships with
+    ``entsoe-py`` so the check is offline and cannot drift from the
+    installed client version (unlike a hardcoded string comparison).
+
+    Args:
+        zone: ``data.entsoe.bidding_zone`` value (whitespace/case are
+            normalized here, so direct callers need not pre-normalize;
+            the ``EntsoeConfig`` validator applies the same rule).
+
+    Returns:
+        The normalized (stripped, uppercased) zone code, unchanged otherwise.
+
+    Raises:
+        InvalidBiddingZoneError: If the zone is not a known ENTSO-E Area
+            code (e.g. ``PSE``, the TSO name — the code for Poland is ``PL``).
+    """
+    from entsoe.mappings import Area
+
+    normalized = zone.strip().upper()
+    if Area.has_code(normalized):
+        area = Area[normalized]
+        logger.debug("Resolved bidding zone %s to EIC code %s", normalized, area.value)
+        return normalized
+    logger.error(
+        "Invalid bidding zone %r (not a known ENTSO-E Area code)", normalized
+    )
+    pl_area = Area.__members__.get("PL")
+    eic_hint = f", EIC {pl_area.value}" if pl_area is not None else ""
+    raise InvalidBiddingZoneError(
+        f"invalid data.entsoe.bidding_zone {normalized!r}: not a known ENTSO-E "
+        "Area code (e.g. 'PSE' is the TSO name — use 'PL' for Poland"
+        f"{eic_hint}). Check data.entsoe.bidding_zone in "
+        "params.yaml."
+    )
 
 
 def _normalize_load_series(
@@ -220,8 +334,9 @@ def download_entsoe_data(entsoe: EntsoeConfig) -> pd.DataFrame:
     """Download day-ahead prices and actual load from ENTSO-E.
 
     Uses the entsoe-py client to fetch data for the configured bidding zone
-    (default: PSE / Poland). Reads the API key from the ``ENTSOE_API_KEY``
-    environment variable.
+    (default: PL / Poland). Reads the API key from the single configured
+    source: ``ENTSOE_API_KEY`` for local runs, ``ENTSOE_API_TOKEN_FILE``
+    (Docker secret file) inside containers.
 
     Args:
         entsoe: ``EntsoeConfig`` with ``bidding_zone``, ``start_date``,
@@ -233,16 +348,25 @@ def download_entsoe_data(entsoe: EntsoeConfig) -> pd.DataFrame:
         is true (the default).
 
     Raises:
-        ValueError: If no ENTSOE_API_KEY environment variable is set.
+        InvalidBiddingZoneError: If ``bidding_zone`` is not a known
+            ENTSO-E Area code. Raised before any client creation or
+            network I/O so a config typo fails fast even when no API
+            key is set; callers must not fall back to synthetic data.
+        MissingApiKeyError: If no key is configured (callers may fall back
+            to synthetic data only for this cause, gated by
+            ``data.entsoe.allow_synthetic``). Query failures raise plain
+            ``ValueError`` and must propagate.
     """
-    api_key = os.environ.get("ENTSOE_API_KEY")
+    bidding_zone = _resolve_bidding_zone(entsoe.bidding_zone)
+
+    api_key = _read_api_key()
     if not api_key:
-        raise ValueError(
-            "ENTSOE_API_KEY environment variable is not set. "
+        logger.error("ENTSOE API key missing (no usable key found)")
+        raise MissingApiKeyError(
+            "No ENTSO-E API key configured (set ENTSOE_API_KEY locally or "
+            "ENTSOE_API_TOKEN_FILE in Docker). "
             "Falling back to synthetic data."
         )
-
-    bidding_zone = entsoe.bidding_zone
 
     client = EntsoeClient(api_key=api_key)
 
@@ -257,18 +381,43 @@ def download_entsoe_data(entsoe: EntsoeConfig) -> pd.DataFrame:
     )
 
     # Download day-ahead prices
-    prices = client.query_day_ahead_prices(
-        bidding_zone, start=start, end=end
-    )
+    try:
+        prices = client.query_day_ahead_prices(
+            bidding_zone, start=start, end=end
+        )
+    except ValueError as exc:
+        logger.exception(
+            "ENTSO-E day-ahead price query failed for zone %s (%s .. %s)",
+            bidding_zone,
+            start,
+            end,
+        )
+        raise ValueError(
+            f"ENTSO-E day-ahead price query failed for bidding zone "
+            f"{bidding_zone!r} ({start} .. {end}): {exc}"
+        ) from exc
 
     df = pd.DataFrame({"timestamp": prices.index, "price_eur_mwh": prices.values})
 
     # Download actual load and merge it as a load_mw column (review point 3:
     # the result is no longer discarded). Gated by include_load.
     if entsoe.include_load:
-        load = _normalize_load_series(
-            client.query_load(bidding_zone, start=start, end=end)
-        )
+        logger.debug("Downloading ENTSO-E actual load for zone %s", bidding_zone)
+        try:
+            load = _normalize_load_series(
+                client.query_load(bidding_zone, start=start, end=end)
+            )
+        except ValueError as exc:
+            logger.exception(
+                "ENTSO-E load query failed for zone %s (%s .. %s)",
+                bidding_zone,
+                start,
+                end,
+            )
+            raise ValueError(
+                f"ENTSO-E load query failed for bidding zone "
+                f"{bidding_zone!r} ({start} .. {end}): {exc}"
+            ) from exc
         load = load.rename("load_mw")
         load_df = load.to_frame()
         load_df.index.name = "timestamp"
@@ -276,6 +425,8 @@ def download_entsoe_data(entsoe: EntsoeConfig) -> pd.DataFrame:
         # any resulting NaN rows are handled by the gap-filling stage.
         df = df.merge(load_df.reset_index(), on="timestamp", how="outer")
         logger.info("Downloaded %d load records", len(load))
+    else:
+        logger.debug("Skipping ENTSO-E load download (include_load=false)")
 
     df = df.sort_values("timestamp").reset_index(drop=True)
 
@@ -371,17 +522,26 @@ def download_generation_mix(
         ``{source}_mw`` column per requested source.
 
     Raises:
-        ValueError: If no ENTSOE_API_KEY environment variable is set.
+        InvalidBiddingZoneError: If ``bidding_zone`` is not a known
+            ENTSO-E Area code. Raised before any client creation or
+            network I/O; callers must not fall back to synthetic data.
+        MissingApiKeyError: If no key is configured (callers may fall back
+            to synthetic data only for this cause, gated by
+            ``data.entsoe.allow_synthetic``). Query failures raise plain
+            ``ValueError`` and must propagate.
     """
-    api_key = os.environ.get("ENTSOE_API_KEY")
+    bidding_zone = _resolve_bidding_zone(entsoe.bidding_zone)
+
+    api_key = _read_api_key()
     if not api_key:
-        raise ValueError(
-            "ENTSOE_API_KEY environment variable is not set. "
+        logger.error("ENTSOE API key missing (no usable key found)")
+        raise MissingApiKeyError(
+            "No ENTSO-E API key configured (set ENTSOE_API_KEY locally or "
+            "ENTSOE_API_TOKEN_FILE in Docker). "
             "Falling back to synthetic data."
         )
     start = pd.Timestamp(entsoe.start_date, tz="UTC") if start is None else start
     end = pd.Timestamp.now(tz="UTC") if end is None else end
-    bidding_zone = entsoe.bidding_zone
 
     client = EntsoeClient(api_key=api_key)
     logger.info(
@@ -399,9 +559,21 @@ def download_generation_mix(
         logger.debug(
             "Generation chunk %d: %s .. %s", year, chunk_start, chunk_end
         )
-        chunk = client.query_generation(
-            bidding_zone, start=chunk_start, end=chunk_end
-        )
+        try:
+            chunk = client.query_generation(
+                bidding_zone, start=chunk_start, end=chunk_end
+            )
+        except ValueError as exc:
+            logger.exception(
+                "ENTSO-E generation query failed for zone %s (%s .. %s)",
+                bidding_zone,
+                chunk_start,
+                chunk_end,
+            )
+            raise ValueError(
+                f"ENTSO-E generation query failed for bidding zone "
+                f"{bidding_zone!r} ({chunk_start} .. {chunk_end}): {exc}"
+            ) from exc
         chunks.append(chunk)
     gen_df = pd.concat(chunks).sort_index()
     gen_df = gen_df[~gen_df.index.duplicated(keep="last")]
@@ -506,33 +678,78 @@ def ingest_generation_mix(
         ``source`` value actually used (``"entsoe"`` or ``"synthetic"``).
 
     Raises:
-        ValueError: If no ENTSOE_API_KEY is set (caller falls back to
-            synthetic generation for all-synthetic runs).
-        RuntimeError: If the download fails for any other reason.
+        InvalidBiddingZoneError: If ``bidding_zone`` is not a known
+            ENTSO-E Area code. Never falls back to synthetic data —
+            a bad zone is a config error, not a missing credential.
+        MissingApiKeyError: If no key is configured (caller falls back to
+            synthetic generation for all-synthetic runs, gated by
+            ``data.entsoe.allow_synthetic``). Query failures raise plain
+            ``ValueError`` and must propagate.
+        RuntimeError: If the download fails for any other reason, or a
+            synthetic cache entry exists while
+            ``data.entsoe.allow_synthetic`` is false.
     """
+    _resolve_bidding_zone(entsoe.bidding_zone)
+
     cache_dir = _generation_cache_dir(raw_dir)
     entry = _read_generation_manifest(cache_dir).get("generation")
     if entry is not None and _generation_entry_covers(
         entry, start, end, generation.sources
     ):
+        if entry.get("source") == SOURCE_SYNTHETIC and not entsoe.allow_synthetic:
+            logger.error(
+                "Generation cache is SYNTHETIC but "
+                "data.entsoe.allow_synthetic is false"
+            )
+            raise RuntimeError(
+                "Generation cache is SYNTHETIC — refusing to build "
+                "training/evaluation features from it. Re-run "
+                "`python -m src ingest` with network access, or set "
+                "data.entsoe.allow_synthetic: true explicitly."
+            )
         logger.info(
             "Generation cache hit (source=%s, range=%s)",
             entry["source"],
             entry["date_range"],
         )
+        logger.debug(
+            "Generation cache covers %s .. %s for sources %s",
+            start,
+            end,
+            sorted(generation.sources),
+        )
         df = pd.read_csv(cache_dir / _GENERATION_CSV_NAME)
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         return df, entry["source"]
 
+    logger.debug(
+        "Generation cache miss for %s .. %s (sources=%s)",
+        start,
+        end,
+        sorted(generation.sources),
+    )
     try:
         df = download_generation_mix(
             entsoe, generation.sources, start=start, end=end
         )
         source = SOURCE_ENTSOE
-    except ValueError:
-        # No API key: an all-synthetic run may substitute synthetic
+    except InvalidBiddingZoneError:
+        raise
+    except MissingApiKeyError as exc:
+        # No key configured: an all-synthetic run may substitute synthetic
         # generation (the source-consistency gate in main() verifies the
-        # run stays uniformly synthetic).
+        # run stays uniformly synthetic). Query/network failures (plain
+        # ValueError) propagate — they must never fabricate training data.
+        if not entsoe.allow_synthetic:
+            logger.error("ENTSO-E generation download unavailable: %s", exc)
+            raise RuntimeError(
+                "ENTSO-E generation download unavailable and "
+                "data.entsoe.allow_synthetic is false — provide "
+                "ENTSOE_API_KEY (local) or ENTSOE_API_TOKEN_FILE (Docker) "
+                "for real data, or set "
+                "data.entsoe.allow_synthetic: true explicitly for offline "
+                "dev/CI runs (never for production training)."
+            ) from exc
         logger.warning(
             "ENTSO-E generation download unavailable (no API key) — "
             "generating SYNTHETIC generation columns (NOT valid for real "

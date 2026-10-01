@@ -18,7 +18,9 @@ This project implements a complete MLOps pipeline for forecasting day-ahead elec
 
 - Python >= 3.11
 - Docker & Docker Compose (for MLflow tracking server)
-- ENTSO-E API key (stored in `secrets/.env`)
+- ENTSO-E API key — `ENTSOE_API_KEY` env var for local runs, or
+  `secrets/entsoe_api_token.txt` (mounted as `ENTSOE_API_TOKEN_FILE`)
+  for the Docker `api` service. Configure exactly one source.
 - **GNU Make** — required to run `make` commands. Linux/macOS include it by default. **Windows users must install it separately**, e.g. via [Chocolatey](https://chocolatey.org/): `choco install make` (requires admin shell), or [Scoop](https://scoop.sh/): `scoop install make`. Alternatively, you can run the commands directly (see table below).
 
 ## Installation
@@ -220,9 +222,8 @@ pytest tests/ -v
 │   ├── integration/  # Integration tests
 │   └── functional/   # End-to-end tests
 ├── params.yaml       # Pipeline configuration
-├── pyproject.toml    # Project metadata and dependencies
-├── Makefile          # Build automation
-└── requirements.txt  # Generated from pyproject.toml
+├── pyproject.toml    # Project metadata and dependencies (single source of truth)
+└── Makefile          # Build automation
 ```
 
 ## License

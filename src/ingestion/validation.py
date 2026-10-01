@@ -45,31 +45,55 @@ def validate_schema(df: pd.DataFrame) -> bool:
     """
     # Column existence
     if "timestamp" not in df.columns:
+        logger.error("Schema check failed: missing column timestamp")
         raise ValueError("Missing required column: timestamp")
     if "price_eur_mwh" not in df.columns:
+        logger.error("Schema check failed: missing column price_eur_mwh")
         raise ValueError("Missing required column: price_eur_mwh")
 
     # Column types
     if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        logger.error(
+            "Schema check failed: timestamp dtype is %s (expected datetime)",
+            df["timestamp"].dtype,
+        )
         raise ValueError("timestamp column must be datetime type")
 
     if not pd.api.types.is_numeric_dtype(df["price_eur_mwh"]):
+        logger.error(
+            "Schema check failed: price_eur_mwh dtype is %s (expected numeric)",
+            df["price_eur_mwh"].dtype,
+        )
         raise ValueError("price_eur_mwh column must be numeric type")
 
     # Null checks
     if df["timestamp"].isnull().any():
+        logger.error(
+            "Schema check failed: %d null timestamp value(s)",
+            int(df["timestamp"].isnull().sum()),
+        )
         raise ValueError("timestamp column contains null values")
     if df["price_eur_mwh"].isnull().any():
+        logger.error(
+            "Schema check failed: %d null price_eur_mwh value(s)",
+            int(df["price_eur_mwh"].isnull().sum()),
+        )
         raise ValueError("price_eur_mwh column contains null values")
 
     # Monotonically increasing timestamps
     if not df["timestamp"].is_monotonic_increasing:
+        logger.error("Schema check failed: timestamps not monotonically increasing")
         raise ValueError("timestamps are not monotonically increasing")
 
     # Duplicate timestamps
     if df["timestamp"].duplicated().any():
+        logger.error(
+            "Schema check failed: %d duplicate timestamp(s)",
+            int(df["timestamp"].duplicated().sum()),
+        )
         raise ValueError("duplicate timestamps found")
 
+    logger.debug("Schema check passed (%d rows)", len(df))
     return True
 
 
@@ -111,8 +135,10 @@ def validate_entsoe_data(
     """
     # Column existence
     if "timestamp" not in df.columns:
+        logger.error("ENTSO-E validation failed: missing column timestamp")
         raise ValueError("Missing required column: timestamp")
     if "price_eur_mwh" not in df.columns:
+        logger.error("ENTSO-E validation failed: missing column price_eur_mwh")
         raise ValueError("Missing required column: price_eur_mwh")
 
     # Optional load column (present when data.entsoe.include_load is true).
@@ -120,16 +146,29 @@ def validate_entsoe_data(
     if "load_mw" in df.columns and not pd.api.types.is_numeric_dtype(
         df["load_mw"]
     ):
+        logger.error(
+            "ENTSO-E validation failed: load_mw dtype is %s (expected numeric)",
+            df["load_mw"].dtype,
+        )
         raise ValueError("load_mw column must be numeric type")
 
     # Timezone check
     if df["timestamp"].dt.tz is None:
+        logger.error("ENTSO-E validation failed: timestamp column is tz-naive")
         raise ValueError("timestamp column must be timezone-aware (UTC)")
     if str(df["timestamp"].dt.tz) != "UTC":
+        logger.error(
+            "ENTSO-E validation failed: timestamp tz is %s (expected UTC)",
+            df["timestamp"].dt.tz,
+        )
         raise ValueError("timestamp column must be in UTC timezone")
 
     # Duplicate timestamps
     if df["timestamp"].duplicated().any():
+        logger.error(
+            "ENTSO-E validation failed: %d duplicate timestamp(s)",
+            int(df["timestamp"].duplicated().sum()),
+        )
         raise ValueError("duplicate timestamps found in ENTSO-E data")
 
     # Sort for gap detection
@@ -169,12 +208,23 @@ def validate_entsoe_data(
     # Outlier detection
     prices = df_sorted["price_eur_mwh"]
     if prices.min() < PRICE_MIN or prices.max() > PRICE_MAX:
+        logger.error(
+            "ENTSO-E validation failed: price out of range "
+            "(min=%.2f, max=%.2f, expected [%.1f, %.1f])",
+            prices.min(),
+            prices.max(),
+            PRICE_MIN,
+            PRICE_MAX,
+        )
         raise ValueError(
             f"Price outliers detected: min={prices.min():.2f}, "
             f"max={prices.max():.2f}. Expected range: "
             f"[{PRICE_MIN}, {PRICE_MAX}]"
         )
 
+    logger.debug(
+        "ENTSO-E validation passed (%d rows, max gap %s)", len(df), max_gap
+    )
     return True
 
 
@@ -263,6 +313,7 @@ def fill_gaps(
         and ``freq`` for recording in the manifest.
     """
     if fill_method not in {"ffill", "interpolate"}:
+        logger.error("Unsupported fill_method %r", fill_method)
         raise ValueError(
             f"Unsupported fill_method: {fill_method!r}. "
             f"Supported: 'ffill', 'interpolate'."
@@ -273,6 +324,7 @@ def fill_gaps(
 
     data_cols = [c for c in df.columns if c != "timestamp"]
     if not data_cols:
+        logger.error("Gap fill failed: DataFrame has no data columns")
         raise ValueError("DataFrame has no data columns to fill")
 
     # Boolean mask of rows that are missing data (any data column is NaN)

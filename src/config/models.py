@@ -113,10 +113,42 @@ class _Strict(BaseModel):
 class EntsoeConfig(_Strict):
     """``data.entsoe`` — ENTSO-E Transparency Platform download settings."""
 
-    bidding_zone: str = "PSE"
+    bidding_zone: str = "PL"
     start_date: date = date(2018, 1, 1)
     include_load: bool = True
     allow_synthetic: bool = False
+
+    @field_validator("bidding_zone", mode="before")
+    @classmethod
+    def _zone_not_empty(cls, v: object) -> str:
+        """Normalize the bidding zone code and reject empty values.
+
+        Only a structural guard lives here: require a string, strip
+        whitespace, uppercase, require non-empty. Authoritative Area-code
+        validation lives in
+        ``src.ingestion.entsoe._resolve_bidding_zone`` (offline, against
+        the bundled ``entsoe.mappings.Area`` enum) so this leaf model
+        stays free of third-party imports and cannot drift from the
+        installed ``entsoe-py`` version.
+
+        Args:
+            v: Raw ``data.entsoe.bidding_zone`` value from ``params.yaml``.
+
+        Returns:
+            The normalized (stripped, uppercased) bidding zone code.
+
+        Raises:
+            ValueError: If the zone is not a string or is empty after stripping.
+        """
+        if not isinstance(v, str):
+            raise ValueError(
+                "data.entsoe.bidding_zone must be a non-empty string, "
+                f"got {v!r}"
+            )
+        zone = v.strip().upper()
+        if not zone:
+            raise ValueError("data.entsoe.bidding_zone must be a non-empty string")
+        return zone
 
 
 class DataConfig(_Strict):

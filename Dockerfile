@@ -1,13 +1,15 @@
 FROM python:3.11-slim
 
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
+# Install production dependencies from pyproject.toml (single source of truth)
+COPY pyproject.toml README.md ./
 COPY src/ ./src/
+RUN pip install --no-cache-dir .
+
+# Copy application configuration
 COPY params.yaml .
 
 # Expose FastAPI port

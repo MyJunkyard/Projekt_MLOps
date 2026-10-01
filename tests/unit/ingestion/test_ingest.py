@@ -16,7 +16,14 @@ import pandas as pd
 import pytest
 
 from src.config.models import DataConfig, EntsoeConfig, PipelineConfig, TemporalConfig
-from src.ingestion.entsoe import download_entsoe_data, generate_synthetic_data
+from src.ingestion.entsoe import (
+    InvalidBiddingZoneError,
+    MissingApiKeyError,
+    _read_api_key,
+    _resolve_bidding_zone,
+    download_entsoe_data,
+    generate_synthetic_data,
+)
 from src.ingestion.main import main
 from src.ingestion.manifest import save_raw_data, write_manifest
 from src.ingestion.validation import (
@@ -26,6 +33,19 @@ from src.ingestion.validation import (
     validate_entsoe_data,
     validate_schema,
 )
+
+
+def _prices(n=24):
+    """Build a deterministic 24-row price Series fixture.
+
+    Args:
+        n: Number of hourly rows to generate.
+
+    Returns:
+        A UTC-indexed Series of linearly spaced prices.
+    """
+    timestamps = pd.date_range("2024-01-01", periods=n, freq="h", tz="UTC")
+    return pd.Series(np.linspace(40, 60, n), index=timestamps)
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +260,7 @@ class TestDownloadEntsoeData:
 
         entsoe = EntsoeConfig.model_validate(
             {
-                "bidding_zone": "PSE",
+                "bidding_zone": "PL",
                 "start_date": "2024-01-01",
                 "include_load": False,
             }
@@ -295,13 +315,142 @@ class TestDownloadEntsoeData:
         download_entsoe_data(sample_config_stage2.data.entsoe)
         mock_client.query_day_ahead_prices.assert_called_once()
         args, _ = mock_client.query_day_ahead_prices.call_args
-        assert args[0] == "PSE"
+        assert args[0] == "PL"
 
     @mock.patch.dict("os.environ", {}, clear=True)
     def test_download_falls_back_to_synthetic(self, sample_config_stage2):
-        """Negative: no API key raises ValueError."""
-        with pytest.raises(ValueError, match="ENTSOE_API_KEY"):
+        """Negative: no API key raises MissingApiKeyError (a ValueError)."""
+        with pytest.raises(MissingApiKeyError, match="No ENTSO-E API key"):
             download_entsoe_data(sample_config_stage2.data.entsoe)
+
+    def test_invalid_zone_raises_before_client_creation(self, caplog):
+        """Negative: unknown zone fails via authoritative Area lookup, no client.
+
+        ``PSE`` (the TSO name) is the regression case from production:
+        config normalizes case but the ingestion gate must reject it with
+        an actionable error and an ERROR log line before any network I/O.
+        """
+        entsoe = EntsoeConfig.model_validate(
+            {"bidding_zone": "PSE", "start_date": "2024-01-01"}
+        )
+        with (
+            mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}),
+            mock.patch("src.ingestion.entsoe.EntsoeClient") as mock_client_class,
+            caplog.at_level(logging.ERROR, logger="src.ingestion.entsoe"),
+            pytest.raises(InvalidBiddingZoneError, match="bidding_zone.*PSE"),
+        ):
+            download_entsoe_data(entsoe)
+        mock_client_class.assert_not_called()
+        assert "Invalid bidding zone" in caplog.text
+
+    def test_invalid_zone_fails_even_without_api_key(self):
+        """Negative: zone validation runs before the API-key gate."""
+        entsoe = EntsoeConfig.model_validate(
+            {"bidding_zone": "XX", "start_date": "2024-01-01"}
+        )
+        with (
+            mock.patch.dict("os.environ", {}, clear=True),
+            pytest.raises(InvalidBiddingZoneError, match="bidding_zone"),
+        ):
+            download_entsoe_data(entsoe)
+
+    def test_resolve_bidding_zone_normalizes_input(self):
+        """Positive: the ingestion gate normalizes like the config validator."""
+        assert _resolve_bidding_zone(" pl ") == "PL"
+
+    def test_missing_api_key_raises_missing_api_key_error(self, sample_config_stage2):
+        """Negative: no key raises MissingApiKeyError (a ValueError)."""
+        with (
+            mock.patch.dict("os.environ", {}, clear=True),
+            pytest.raises(MissingApiKeyError, match="No ENTSO-E API key"),
+        ):
+            download_entsoe_data(sample_config_stage2.data.entsoe)
+
+    @mock.patch("src.ingestion.entsoe.EntsoeClient")
+    def test_query_failure_is_not_a_missing_key(self, mock_client_class, caplog):
+        """Negative: query errors stay plain ValueError — never MissingApiKeyError.
+
+        Guards the synthetic-fallback gate: only a missing key may trigger
+        synthetic substitution; a transient ENTSO-E failure must propagate.
+        """
+        mock_client = mock.MagicMock()
+        mock_client_class.return_value = mock_client
+        mock_client.query_day_ahead_prices.side_effect = ValueError(
+            "Invalid country code."
+        )
+        entsoe = EntsoeConfig.model_validate(
+            {"bidding_zone": "PL", "start_date": "2024-01-01", "include_load": False}
+        )
+        with mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}):
+            with caplog.at_level(logging.ERROR, logger="src.ingestion.entsoe"):
+                with pytest.raises(
+                    ValueError, match="day-ahead price query failed.*PL"
+                ) as exc_info:
+                    download_entsoe_data(entsoe)
+        assert not isinstance(exc_info.value, MissingApiKeyError)
+        assert "day-ahead price query failed" in caplog.text
+
+    def test_read_api_key_single_source_conflict(self, tmp_path, caplog):
+        """Negative: both key sources set at once is a configuration error."""
+        token_file = tmp_path / "token.txt"
+        token_file.write_text("secret-key", encoding="utf-8")
+        env = {
+            "ENTSOE_API_KEY": "env-key",
+            "ENTSOE_API_TOKEN_FILE": str(token_file),
+        }
+        with (
+            mock.patch.dict("os.environ", env, clear=False),
+            caplog.at_level(logging.ERROR, logger="src.ingestion.entsoe"),
+            pytest.raises(ValueError, match="exactly one"),
+        ):
+            _read_api_key()
+        assert "Both ENTSOE_API_KEY" in caplog.text
+
+    def test_read_api_key_secret_file_source(self, tmp_path):
+        """Positive: Docker secret-file source is read when it is the only one."""
+        token_file = tmp_path / "token.txt"
+        token_file.write_text("  file-key  ", encoding="utf-8")
+        env = {"ENTSOE_API_TOKEN_FILE": str(token_file)}
+        with mock.patch.dict("os.environ", env, clear=True):
+            assert _read_api_key() == "file-key"
+
+    def test_read_api_key_unreadable_secret_file(self, tmp_path):
+        """Negative: unreadable secret file raises ValueError (never silent)."""
+        env = {"ENTSOE_API_TOKEN_FILE": str(tmp_path / "missing-token.txt")}
+        with (
+            mock.patch.dict("os.environ", env, clear=True),
+            pytest.raises(ValueError, match="Unable to read ENTSOE secret file"),
+        ):
+            _read_api_key()
+
+    @mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}, clear=False)
+    @mock.patch("src.ingestion.entsoe.EntsoeClient")
+    def test_query_failure_logs_and_reraises(self, mock_client_class, caplog):
+        """Negative: client-side ValueError is logged with context and reraised."""
+        mock_client = mock.MagicMock()
+        mock_client_class.return_value = mock_client
+        mock_client.query_day_ahead_prices.side_effect = ValueError(
+            "Invalid country code."
+        )
+        entsoe = EntsoeConfig.model_validate(
+            {"bidding_zone": "PL", "start_date": "2024-01-01", "include_load": False}
+        )
+        with (
+            caplog.at_level(logging.ERROR, logger="src.ingestion.entsoe"),
+            pytest.raises(ValueError, match="day-ahead price query failed.*PL"),
+        ):
+            download_entsoe_data(entsoe)
+        assert "day-ahead price query failed" in caplog.text
+
+    @mock.patch.dict("os.environ", {}, clear=True)
+    def test_missing_api_key_logs_error(self, sample_config_stage2, caplog):
+        """Negative: missing key emits an ERROR line before raising."""
+        with (
+            caplog.at_level(logging.ERROR, logger="src.ingestion.entsoe"),
+            pytest.raises(MissingApiKeyError, match="No ENTSO-E API key"),
+        ):
+            download_entsoe_data(sample_config_stage2.data.entsoe)
+        assert "API key missing" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -689,7 +838,7 @@ class TestWriteManifest:
         manifest_path = tmp_path / "manifest.json"
         assert manifest_path.exists()
 
-        with open(manifest_path) as f:
+        with open(manifest_path, encoding="utf-8") as f:
             manifest = json.load(f)
 
         assert "downloaded_at" in manifest
@@ -702,7 +851,7 @@ class TestWriteManifest:
         write_manifest(str(tmp_path), sample_df)
         manifest_path = tmp_path / "manifest.json"
 
-        with open(manifest_path) as f:
+        with open(manifest_path, encoding="utf-8") as f:
             manifest = json.load(f)
 
         csv_bytes = sample_df.to_csv(index=False).encode("utf-8")
@@ -714,7 +863,7 @@ class TestWriteManifest:
         write_manifest(str(tmp_path), sample_df)
         manifest_path = tmp_path / "manifest.json"
 
-        with open(manifest_path) as f:
+        with open(manifest_path, encoding="utf-8") as f:
             manifest = json.load(f)
 
         assert manifest["row_count"] == len(sample_df)
@@ -734,7 +883,7 @@ class TestWriteManifest:
         write_manifest(str(tmp_path), filled, imputation_stats=stats)
         manifest_path = tmp_path / "manifest.json"
 
-        with open(manifest_path) as f:
+        with open(manifest_path, encoding="utf-8") as f:
             manifest = json.load(f)
 
         assert manifest["n_imputed_rows"] == 2
@@ -749,7 +898,7 @@ class TestWriteManifest:
         write_manifest(str(tmp_path), sample_df, sha256_hash=provided)
         manifest_path = tmp_path / "manifest.json"
 
-        with open(manifest_path) as f:
+        with open(manifest_path, encoding="utf-8") as f:
             manifest = json.load(f)
 
         assert manifest["sha256"] == provided
@@ -778,7 +927,7 @@ class TestMainEmptyDataGuard:
                     "train_end": "2023-12-31",
                     "val_end": "2024-01-01",
                     "entsoe": {
-                        "bidding_zone": "PSE",
+                        "bidding_zone": "PL",
                         "start_date": "2024-01-01",
                     },
                 },
@@ -889,7 +1038,7 @@ class TestMainResolutionGrid:
                     "fill_method": "ffill",
                     "drop_long_gaps": True,
                     "entsoe": {
-                        "bidding_zone": "PSE",
+                        "bidding_zone": "PL",
                         "start_date": "2024-01-01",
                     },
                 },
@@ -946,7 +1095,7 @@ class TestMainHashProvenance:
                     "fill_method": "ffill",
                     "drop_long_gaps": True,
                     "entsoe": {
-                        "bidding_zone": "PSE",
+                        "bidding_zone": "PL",
                         "start_date": "2024-01-01",
                     },
                 },
@@ -963,7 +1112,7 @@ class TestMainHashProvenance:
         assert output_csv.exists()
         assert manifest_json.exists()
 
-        with open(manifest_json) as f:
+        with open(manifest_json, encoding="utf-8") as f:
             manifest = json.load(f)
 
         # Link 1: manifest hash matches the actual on-disk file bytes

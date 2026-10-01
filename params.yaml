@@ -12,10 +12,12 @@ data:
   add_is_imputed_flag: true     # add an is_imputed column so downstream can handle imputed rows
   drop_long_gaps: true          # drop rows left as NaN after imputation (explicit policy)
   entsoe:
-    bidding_zone: "PSE"
+    bidding_zone: "PL"
     start_date: "2018-01-01"
     include_load: true            # also download actual load and store as load_mw column
-    # ENTSO-E API key is read from env var ENTSOE_API_KEY
+    # ENTSO-E API key: single source per runtime — ENTSOE_API_KEY env var
+    # for local runs, ENTSOE_API_TOKEN_FILE (Docker secret file) in
+    # containers. Exactly one may be set (see _read_api_key).
     allow_synthetic: false        # offline opt-in: substitute synthetic
                                  # price/load when the key is missing
                                  # (D7 policy; never production training)

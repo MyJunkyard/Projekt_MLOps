@@ -16,6 +16,7 @@ from src.config import load_config
 from src.config.models import (
     SUPPORTED_METRICS,
     DataConfig,
+    EntsoeConfig,
     LoggingConfig,
     ModelConfig,
     PipelineConfig,
@@ -252,6 +253,26 @@ class TestSectionModels:
         """Positive: LoggingConfig.file defaults to None (DEFAULT_LOG_FILE)."""
         assert LoggingConfig().file is None
         assert LoggingConfig().level == "INFO"
+
+
+# ---------------------------------------------------------------------------
+# EntsoeConfig bidding-zone normalization
+# ---------------------------------------------------------------------------
+class TestEntsoeConfigZone:
+    def test_zone_normalized(self):
+        """Positive: whitespace/case normalize to the canonical code."""
+        cfg = EntsoeConfig.model_validate(
+            {"bidding_zone": " pl ", "start_date": "2024-01-01"}
+        )
+        assert cfg.bidding_zone == "PL"
+
+    @pytest.mark.parametrize("bad", ["   ", None, 123])
+    def test_zone_rejects_empty_or_non_string(self, bad):
+        """Negative: empty or non-string zones fail as ValidationError."""
+        with pytest.raises(ValidationError, match="bidding_zone"):
+            EntsoeConfig.model_validate(
+                {"bidding_zone": bad, "start_date": "2024-01-01"}
+            )
 
 
 # ---------------------------------------------------------------------------

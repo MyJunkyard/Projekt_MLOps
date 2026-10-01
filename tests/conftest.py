@@ -48,7 +48,7 @@ def sample_config_stage2() -> PipelineConfig:
                 "target_col": "price_eur_mwh",
                 "train_end": "2023-12-31",
                 "val_end": "2024-01-01",
-                "entsoe": {"bidding_zone": "PSE", "start_date": "2018-01-01"},
+                "entsoe": {"bidding_zone": "PL", "start_date": "2018-01-01"},
             },
             "features": {
                 "calendar": {

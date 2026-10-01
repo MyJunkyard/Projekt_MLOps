@@ -1,6 +1,8 @@
 secrets:
   postgres_password:
     file: secrets/postgres_password.txt
+  entsoe_api_token:
+    file: secrets/entsoe_api_token.txt
 
 services:
   postgres:
@@ -56,10 +58,16 @@ services:
   api:
     build: .
     container_name: energy-api
+    secrets:
+      - entsoe_api_token
     ports:
       - "8000:8000"
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      # Single ENTSO-E key source: the secret file. Local runs use
+      # ENTSOE_API_KEY instead (see _read_api_key); exactly one source
+      # may be configured at a time.
+      ENTSOE_API_TOKEN_FILE: /run/secrets/entsoe_api_token
     volumes:
       - ./src:/app/src
       - ./params.yaml:/app/params.yaml

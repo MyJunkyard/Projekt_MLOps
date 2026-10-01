@@ -12,6 +12,8 @@ from pathlib import Path
 from src.common.logsetup import setup_logging
 from src.config import load_config
 from src.ingestion.entsoe import (
+    InvalidBiddingZoneError,
+    MissingApiKeyError,
     download_entsoe_data,
     generate_synthetic_data,
     ingest_generation_mix,
@@ -56,10 +58,17 @@ def main():
         df = download_entsoe_data(cfg.data.entsoe)
         logger.info("Downloaded %s rows from ENTSO-E", f"{len(df):,}")
         entsoe_source = SOURCE_ENTSOE
-    except ValueError as e:
+    except InvalidBiddingZoneError:
+        # Config error — never mask as missing credentials with synthetic data.
+        raise
+    except MissingApiKeyError as e:
+        # No key configured: an all-synthetic run may substitute synthetic
+        # data when explicitly opted in. Query/network failures (plain
+        # ValueError) propagate — they must never fabricate training data.
         if not cfg.data.entsoe.allow_synthetic:
             raise RuntimeError(
-                "ENTSO-E download unavailable (missing ENTSOE_API_KEY). "
+                "ENTSO-E download unavailable (missing ENTSOE_API_KEY locally "
+                "or ENTSOE_API_TOKEN_FILE in Docker). "
                 "Provide the key for real data, or set "
                 "data.entsoe.allow_synthetic: true explicitly for offline "
                 "dev/CI runs — never for production training: fabricated "

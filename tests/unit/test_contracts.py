@@ -90,7 +90,7 @@ def _make_config(
         "val_end": "2023-06-08",
         "add_is_imputed_flag": add_is_imputed,
         "entsoe": {
-            "bidding_zone": "PSE",
+            "bidding_zone": "PL",
             "start_date": "2023-06-01",
             "include_load": include_load,
             "allow_synthetic": allow_synthetic,

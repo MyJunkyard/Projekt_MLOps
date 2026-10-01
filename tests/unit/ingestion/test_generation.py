@@ -17,6 +17,8 @@ import pytest
 
 from src.config.models import EntsoeConfig, GenerationMixConfig
 from src.ingestion.entsoe import (
+    InvalidBiddingZoneError,
+    MissingApiKeyError,
     download_generation_mix,
     generate_synthetic_data,
     generate_synthetic_generation,
@@ -46,7 +48,7 @@ def _psr_frame(n=24):
 
 def _entsoe_cfg(tmp_start="2024-01-01") -> EntsoeConfig:
     return EntsoeConfig.model_validate(
-        {"bidding_zone": "PSE", "start_date": tmp_start}
+        {"bidding_zone": "PL", "start_date": tmp_start}
     )
 
 
@@ -119,12 +121,108 @@ class TestDownloadGenerationMix:
 
         download_generation_mix(_entsoe_cfg(), _SOURCES)
         args, _ = mock_client.query_generation.call_args
-        assert args[0] == "PSE"
+        assert args[0] == "PL"
 
     @mock.patch.dict("os.environ", {}, clear=True)
     def test_no_api_key_raises(self):
-        with pytest.raises(ValueError, match="ENTSOE_API_KEY"):
+        with pytest.raises(MissingApiKeyError, match="No ENTSO-E API key"):
             download_generation_mix(_entsoe_cfg(), _SOURCES)
+
+    @mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}, clear=False)
+    @mock.patch("src.ingestion.entsoe.EntsoeClient")
+    def test_generation_query_failure_is_not_a_missing_key(
+        self, mock_client_class
+    ):
+        """Negative: generation query errors must propagate, never fall back."""
+        mock_client = mock.MagicMock()
+        mock_client_class.return_value = mock_client
+        mock_client.query_generation.side_effect = ValueError("boom")
+        with pytest.raises(ValueError, match="generation query failed") as exc_info:
+            download_generation_mix(_entsoe_cfg(), ["wind"])
+        assert not isinstance(exc_info.value, MissingApiKeyError)
+
+    def test_invalid_zone_never_falls_back(self, tmp_path):
+        """Negative: bad zone raises InvalidBiddingZoneError, no synthetic cache.
+
+        Regression for the production ``PSE`` failure: the generation path
+        must not mask a config error as a missing key.
+        """
+        bad = EntsoeConfig.model_validate(
+            {"bidding_zone": "PSE", "start_date": "2024-01-01"}
+        )
+        with (
+            mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}),
+            pytest.raises(InvalidBiddingZoneError, match="bidding_zone.*PSE"),
+        ):
+            ingest_generation_mix(
+                GenerationMixConfig(enabled=True, sources=["wind"]),
+                bad,
+                tmp_path,
+                pd.Timestamp("2024-01-01", tz="UTC"),
+                pd.Timestamp("2024-01-02", tz="UTC"),
+            )
+        assert not (tmp_path / "entsoe" / "generation" / "generation.csv").exists()
+
+    def test_generation_download_refused_without_flag(self, tmp_path):
+        """Negative: missing key + allow_synthetic=false raises RuntimeError."""
+        cfg = EntsoeConfig.model_validate(
+            {
+                "bidding_zone": "PL",
+                "start_date": "2024-01-01",
+                "allow_synthetic": False,
+            }
+        )
+        with (
+            mock.patch.dict("os.environ", {}, clear=True),
+            pytest.raises(RuntimeError, match="allow_synthetic is false"),
+        ):
+            ingest_generation_mix(
+                GenerationMixConfig(enabled=True, sources=["wind"]),
+                cfg,
+                tmp_path,
+                pd.Timestamp("2024-01-01", tz="UTC"),
+                pd.Timestamp("2024-01-02", tz="UTC"),
+            )
+
+    def test_synthetic_generation_cache_refused_without_flag(self, tmp_path):
+        """Negative: synthetic cache entry is refused when flag is false.
+
+        Mirrors the weather-cache policy: a cached SYNTHETIC frame must not
+        be reused for real runs unless explicitly opted in.
+        """
+        from src.ingestion.entsoe import _write_generation_cache
+        from src.ingestion.manifest import SOURCE_SYNTHETIC
+
+        frame = pd.DataFrame(
+            {
+                "timestamp": pd.date_range(
+                    "2024-01-01", periods=48, freq="h", tz="UTC"
+                ),
+                "wind_mw": np.linspace(100, 200, 48),
+            }
+        )
+        # Seed a synthetic cache entry directly (offline, no network).
+        _write_generation_cache(
+            tmp_path / "entsoe" / "generation",
+            frame,
+            SOURCE_SYNTHETIC,
+            ["wind"],
+        )
+        cfg = EntsoeConfig.model_validate(
+            {
+                "bidding_zone": "PL",
+                "start_date": "2024-01-01",
+                "allow_synthetic": False,
+            }
+        )
+        with pytest.raises(RuntimeError, match="SYNTHETIC"):
+            ingest_generation_mix(
+                GenerationMixConfig(enabled=True, sources=["wind"]),
+                cfg,
+                tmp_path,
+                pd.Timestamp("2024-01-01", tz="UTC"),
+                pd.Timestamp("2024-01-02", tz="UTC"),
+            )
 
 
 class TestSyntheticGeneration:
@@ -235,11 +333,18 @@ class TestIngestGenerationMix:
             assert len(df2) == 48
 
     def test_no_api_key_falls_back_to_synthetic(self, tmp_path):
-        """Positive: no API key → synthetic frame cached with source=synthetic."""
+        """Positive: no API key + explicit opt-in → synthetic frame cached."""
+        cfg = EntsoeConfig.model_validate(
+            {
+                "bidding_zone": "PL",
+                "start_date": "2024-01-01",
+                "allow_synthetic": True,
+            }
+        )
         with mock.patch.dict("os.environ", {}, clear=True):
             df, source = ingest_generation_mix(
                 GenerationMixConfig(enabled=True, sources=["wind", "solar"]),
-                _entsoe_cfg("2024-01-01"),
+                cfg,
                 tmp_path,
                 pd.Timestamp("2024-01-01", tz="UTC"),
                 pd.Timestamp("2024-01-03", tz="UTC"),

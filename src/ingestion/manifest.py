@@ -88,7 +88,7 @@ def write_manifest(
         manifest["freq"] = imputation_stats.get("freq", "h")
 
     manifest_path = path_obj / "manifest.json"
-    with open(manifest_path, "w") as f:
+    with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
     logger.info("Manifest written to %s", manifest_path)
