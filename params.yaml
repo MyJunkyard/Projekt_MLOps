@@ -13,7 +13,14 @@ data:
   drop_long_gaps: true          # drop rows left as NaN after imputation (explicit policy)
   entsoe:
     bidding_zone: "PL"
-    start_date: "2018-01-01"
+    # ENTSO-E served PL day-ahead prices in PLN (not EUR) for delivery days
+    # up to 2019-11-19; EUR from 2019-11-20 (verified against the raw XML
+    # <currency_Unit.name> tag). entsoe-py does no FX conversion, so rows
+    # before the switch would put PLN values into price_eur_mwh. We start at
+    # the switch date to keep the stored currency consistent; a follow-up
+    # could convert the 2018-01-01..2019-11-19 era via ECB reference rates
+    # and move this date back.
+    start_date: "2019-11-20"
     include_load: true            # also download actual load and store as load_mw column
     # ENTSO-E API key: single source per runtime — ENTSOE_API_KEY env var
     # for local runs, ENTSOE_API_TOKEN_FILE (Docker secret file) in
@@ -51,7 +58,10 @@ features:
     smooth_window: 3            # smoothing before differencing to reduce noise
   generation_mix:
     enabled: true               # ENTSO-E generation by source (WS4)
-    sources: [wind, solar, coal, gas, nuclear, hydro]
+    # No 'nuclear': Poland has no operating nuclear plants, so ENTSO-E
+    # returns no matching PSR type and the column would be all-NaN — with
+    # data.drop_long_gaps=true that NaN column drops EVERY row at ingest.
+    sources: [wind, solar, coal, gas, hydro]
   cross_border_flows:
     enabled: false
   # Real-time publication lag (hours) per raw external column (WS4).
@@ -65,7 +75,6 @@ features:
     coal_mw: 1
     gas_mw: 1
     hydro_mw: 1
-    nuclear_mw: 1
     solar_mw: 1
     wind_mw: 1
 

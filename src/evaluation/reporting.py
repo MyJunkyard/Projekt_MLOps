@@ -12,6 +12,7 @@ import pandas as pd
 
 from src.common.splits import get_split_masks
 from src.config.models import DataConfig, PipelineConfig
+from src.training.loader import get_feature_names
 
 MODULE_LOGGER_NAME = "src.evaluation.reporting"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
@@ -135,7 +136,12 @@ def load_test_features(
     df_test = df.iloc[test_mask]
 
     y_test = df_test[target_col].values
-    feature_cols = [c for c in df_test.columns if c not in [target_col, "timestamp"]]
+    # Same column resolution as the training stage (schema sidecar first,
+    # legacy fallback with a WARNING) so the model sees exactly the columns
+    # it was fitted on — the legacy "all non-timestamp, non-target" rule
+    # alone would include meta columns (e.g. is_imputed) and raise
+    # "Feature shape mismatch" against a sidecar-trained model.
+    feature_cols = get_feature_names(path, data)
     X_test = df_test[feature_cols].values
 
     logger.info(

@@ -298,6 +298,39 @@ class TestDownloadEntsoeData:
 
     @mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}, clear=False)
     @mock.patch("src.ingestion.entsoe.EntsoeClient")
+    def test_download_normalizes_area_tz_to_utc(
+        self, mock_client_class
+    ):
+        """Regression: area-tz client returns become UTC timestamps.
+
+        entsoe-py returns Europe/Warsaw indexes; the stored frame must be
+        UTC so downstream validation/merges never see mixed offsets.
+        """
+        mock_client = mock.MagicMock()
+        mock_client_class.return_value = mock_client
+        idx = pd.date_range("2024-01-01", periods=24, freq="h", tz="Europe/Warsaw")
+        mock_client.query_day_ahead_prices.return_value = pd.Series(
+            np.linspace(40, 60, 24), index=idx
+        )
+        mock_client.query_load.return_value = pd.Series(
+            np.linspace(1000, 2000, 24), index=idx
+        )
+
+        df = download_entsoe_data(
+            EntsoeConfig.model_validate(
+                {"bidding_zone": "PL", "start_date": "2024-01-01"}
+            )
+        )
+        assert str(df["timestamp"].dt.tz) == "UTC"
+        _, kwargs = mock_client.query_day_ahead_prices.call_args
+        assert str(kwargs["start"].tzinfo) == "Europe/Warsaw"
+        # Same instant as the UTC default: 2024-01-01 00:00 UTC == 01:00 Warsaw.
+        assert kwargs["start"].tz_convert("UTC") == pd.Timestamp(
+            "2024-01-01", tz="UTC"
+        )
+
+    @mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}, clear=False)
+    @mock.patch("src.ingestion.entsoe.EntsoeClient")
     def test_download_uses_bidding_zone_from_config(
         self, mock_client_class, sample_config_stage2
     ):
@@ -641,15 +674,6 @@ class TestValidateEntsoeData:
         with caplog.at_level(logging.WARNING):
             assert validate_entsoe_data(bad, data, temporal) is True
         assert "gap" not in caplog.text.lower()
-
-    def test_outlier_detection_raises(self, sample_df, sample_config_stage2):
-        """Negative: price outside plausible range raises ValueError."""
-        bad = sample_df.copy()
-        bad.loc[0, "price_eur_mwh"] = 10000.0
-        with pytest.raises(ValueError, match="outlier"):
-            validate_entsoe_data(
-                bad, sample_config_stage2.data, sample_config_stage2.temporal
-            )
 
     def test_duplicate_timestamps_raise(self, sample_df, sample_config_stage2):
         """Negative: duplicate timestamps raise ValueError."""

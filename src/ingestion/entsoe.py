@@ -166,6 +166,60 @@ def _resolve_bidding_zone(zone: str) -> str:
         "params.yaml."
     )
 
+def _resolve_area_tz(zone: str) -> str:
+    """Return the IANA timezone of an ENTSO-E bidding zone (PL → Europe/Warsaw)."""
+    from entsoe.mappings import Area
+
+    return Area[zone.strip().upper()].tz
+
+
+def _entsoe_query_bounds(
+    start: pd.Timestamp | None,
+    end: pd.Timestamp | None,
+    area_tz: str,
+    default_start: str,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Express query bounds in the bidding zone's local tz for entsoe-py.
+
+    entsoe-py's ``EntsoePandasClient.query_*`` does
+    ``df.tz_convert(area.tz).truncate(before=start, after=end)`` internally.
+    pandas' ``truncate``/``slice_locs`` compares the ``tzinfo`` objects of
+    the two bounds (``tz_compare``) and raises
+    ``ValueError("Both dates must have the same UTC offset")`` when they
+    differ — e.g. ``start=2026-01-01+00:00`` (UTC) vs
+    ``end=2026-10-02+02:00`` (CEST). Passing both bounds already in
+    ``area_tz`` keeps the comparison in one zone so it succeeds across DST
+    boundaries. The wire format is unaffected (``_datetime_to_str`` converts
+    to UTC either way — the same instant is requested), and every returned
+    frame is still normalized to UTC at our boundary, so stored data stays
+    UTC end-to-end. Naive inputs are assumed to already be UTC.
+    """
+    if start is None:
+        # Config dates are calendar days in UTC (old behavior): midnight UTC,
+        # expressed in the area tz (== 01:00 Warsaw in winter).
+        query_start = pd.Timestamp(default_start, tz="UTC").tz_convert(area_tz)
+    else:
+        query_start = pd.Timestamp(start)
+        if query_start.tzinfo is None:
+            query_start = query_start.tz_localize("UTC")
+        query_start = query_start.tz_convert(area_tz)
+    if end is None:
+        query_end = pd.Timestamp.now(tz=area_tz)
+    else:
+        query_end = pd.Timestamp(end)
+        if query_end.tzinfo is None:
+            query_end = query_end.tz_localize("UTC")
+        query_end = query_end.tz_convert(area_tz)
+    return query_start, query_end
+
+
+def _as_utc_index(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize a returned entsoe-py frame's index to UTC (no-op when naive)."""
+    if isinstance(frame.index, pd.DatetimeIndex) and frame.index.tz is not None:
+        return frame.tz_convert("UTC")
+    return frame
+
+
 
 def _normalize_load_series(
     load: pd.Series | pd.DataFrame,
@@ -370,8 +424,12 @@ def download_entsoe_data(entsoe: EntsoeConfig) -> pd.DataFrame:
 
     client = EntsoeClient(api_key=api_key)
 
-    start = pd.Timestamp(entsoe.start_date, tz="UTC")
-    end = pd.Timestamp.now(tz="UTC")
+    # Query bounds in the area tz: entsoe-py truncates with these bounds
+    # after tz_convert(area.tz), and pandas' truncate requires same-offset
+    # bounds (see _entsoe_query_bounds). Stored data stays UTC — every
+    # returned frame is normalized below.
+    area_tz = _resolve_area_tz(bidding_zone)
+    start, end = _entsoe_query_bounds(None, None, area_tz, str(entsoe.start_date))
 
     logger.info(
         "Downloading ENTSO-E data for bidding zone '%s' from %s to %s",
@@ -398,6 +456,10 @@ def download_entsoe_data(entsoe: EntsoeConfig) -> pd.DataFrame:
         ) from exc
 
     df = pd.DataFrame({"timestamp": prices.index, "price_eur_mwh": prices.values})
+    # Boundary: entsoe-py returns the area tz (PL → Europe/Warsaw, fixed
+    # +01:00/+02:00 offsets). Normalize to UTC so the timestamp handed to
+    # ingest_generation_mix() (min/max) never carries a mixed offset.
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
     # Download actual load and merge it as a load_mw column (review point 3:
     # the result is no longer discarded). Gated by include_load.
@@ -421,6 +483,11 @@ def download_entsoe_data(entsoe: EntsoeConfig) -> pd.DataFrame:
         load = load.rename("load_mw")
         load_df = load.to_frame()
         load_df.index.name = "timestamp"
+        # Normalize the load index to UTC to match the price column: both
+        # come back in the area tz and the outer merge aligns on instants.
+        load_df.index = pd.DatetimeIndex(
+            pd.to_datetime(load_df.index, utc=True), name="timestamp"
+        )
         # Outer join so wider load coverage doesn't silently drop hours;
         # any resulting NaN rows are handled by the gap-filling stage.
         df = df.merge(load_df.reset_index(), on="timestamp", how="outer")
@@ -540,8 +607,13 @@ def download_generation_mix(
             "ENTSOE_API_TOKEN_FILE in Docker). "
             "Falling back to synthetic data."
         )
-    start = pd.Timestamp(entsoe.start_date, tz="UTC") if start is None else start
-    end = pd.Timestamp.now(tz="UTC") if end is None else end
+    # Query bounds in the area tz (see download_entsoe_data): callers pass
+    # UTC min/max, but entsoe-py truncates in area tz internally. Returned
+    # chunks are normalized to UTC at our boundary below.
+    area_tz = _resolve_area_tz(bidding_zone)
+    start, end = _entsoe_query_bounds(
+        start, end, area_tz, str(entsoe.start_date)
+    )
 
     client = EntsoeClient(api_key=api_key)
     logger.info(
@@ -554,8 +626,8 @@ def download_generation_mix(
 
     chunks: list[pd.DataFrame] = []
     for year in range(start.year, end.year + 1):
-        chunk_start = max(start, pd.Timestamp(f"{year}-01-01", tz="UTC"))
-        chunk_end = min(end, pd.Timestamp(f"{year + 1}-01-01", tz="UTC"))
+        chunk_start = max(start, pd.Timestamp(f"{year}-01-01", tz=area_tz))
+        chunk_end = min(end, pd.Timestamp(f"{year + 1}-01-01", tz=area_tz))
         logger.debug(
             "Generation chunk %d: %s .. %s", year, chunk_start, chunk_end
         )
@@ -574,6 +646,20 @@ def download_generation_mix(
                 f"ENTSO-E generation query failed for bidding zone "
                 f"{bidding_zone!r} ({chunk_start} .. {chunk_end}): {exc}"
             ) from exc
+        # Boundary: normalize each chunk's area-tz index to UTC before concat
+        # (stored data stays UTC end-to-end). Without this, chunks carrying
+        # fixed +01:00/+02:00 offsets fail downstream merges and slicing.
+        chunk = _as_utc_index(chunk)
+        # Harden against entsoe-py's naive inner year blocks (dateutil rrule
+        # drops tzinfo): if its internal truncate raised the mixed-offset
+        # error above, it would already have propagated as ValueError. Here
+        # we additionally clip the chunk to our UTC window with a boolean
+        # mask (no truncate/tz_compare involved) so over-wide responses
+        # cannot leak outside the requested range.
+        utc_start = pd.Timestamp(chunk_start).tz_convert("UTC")
+        utc_end = pd.Timestamp(chunk_end).tz_convert("UTC")
+        mask = (chunk.index >= utc_start) & (chunk.index <= utc_end)
+        chunk = chunk.loc[mask]
         chunks.append(chunk)
     gen_df = pd.concat(chunks).sort_index()
     gen_df = gen_df[~gen_df.index.duplicated(keep="last")]
@@ -720,7 +806,20 @@ def ingest_generation_mix(
         )
         df = pd.read_csv(cache_dir / _GENERATION_CSV_NAME)
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        return df, entry["source"]
+        # The cache may be wider than the current config (e.g. it was
+        # written before a source like 'nuclear' was dropped): return only
+        # the configured source columns, or an all-NaN stale column would
+        # re-enter the frame and drop_long_gaps would delete every row.
+        wanted = [f"{source}_mw" for source in generation.sources]
+        missing = [col for col in wanted if col not in df.columns]
+        if missing:
+            logger.warning(
+                "Generation cache is missing column(s) %s — ignoring cache "
+                "and re-downloading",
+                missing,
+            )
+        else:
+            return df[["timestamp", *wanted]], entry["source"]
 
     logger.debug(
         "Generation cache miss for %s .. %s (sources=%s)",

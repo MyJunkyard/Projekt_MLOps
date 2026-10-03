@@ -9,11 +9,82 @@ pipeline code consumes); tests may mutate attributes on them freely —
 fixtures are function-scoped, so each test gets a fresh instance.
 """
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from src.config.models import PipelineConfig
+
+
+@pytest.fixture(autouse=True)
+def _no_project_log_pollution(tmp_path, monkeypatch):
+    """Keep pytest runs out of the project-local pipeline log.
+
+    ``src.common.logsetup.setup_logging`` mirrors every pipeline log record
+    to ``logs/energy_forecast_pipeline.log``. Contract/ingest tests call the
+    real ``main()`` entry points, so without isolation dozens of temp-dir
+    runs interleave in that one file and look like a single failing app run
+    (see log range 11552+ / pytest-125).
+
+    The fixture redirects the *default* log file to a per-test tmp path and
+    detaches any pre-existing ``FileHandler`` from the ``src*`` package
+    loggers for the duration of the test. Explicit ``logging.file`` configs
+    still write where asked, and ``caplog`` keeps working (``propagate`` is
+    untouched — only handlers are managed).
+    """
+    import src.common.logsetup as logsetup
+
+    redirected = tmp_path / "logs" / "pytest.log"
+    monkeypatch.setattr(logsetup, "DEFAULT_LOG_FILE", str(redirected))
+    # ``tests/unit/common/test_utils.py`` does
+    # ``from src.common.logsetup import DEFAULT_LOG_FILE`` at module import,
+    # so the constant is also bound as ``test_utils.DEFAULT_LOG_FILE`` —
+    # patch that reference too when the module is already imported.
+    import sys
+
+    tu = sys.modules.get("tests.unit.common.test_utils")
+    if tu is not None and hasattr(tu, "DEFAULT_LOG_FILE"):
+        monkeypatch.setattr(tu, "DEFAULT_LOG_FILE", str(redirected))
+
+    managed_names = [
+        "src",
+        "src.ingestion",
+        "src.features",
+        "src.training",
+        "src.evaluation",
+        "src.serving",
+        "src.monitoring",
+    ]
+    # Detach handlers that would write to the project log so records from a
+    # previous test (same worker process) cannot leak into this one.
+    detached: list[tuple[logging.Logger, logging.Handler]] = []
+    for name in managed_names:
+        logger = logging.getLogger(name)
+        for handler in list(logger.handlers):
+            if isinstance(handler, logging.FileHandler):
+                logger.removeHandler(handler)
+                detached.append((logger, handler))
+
+    try:
+        yield redirected
+    finally:
+        # Close + drop any FileHandler the test created (e.g. via
+        # setup_logging with the redirected default), then restore what we
+        # detached. Closing matters on Windows (file locks).
+        for name in managed_names:
+            logger = logging.getLogger(name)
+            for handler in list(logger.handlers):
+                if isinstance(handler, logging.FileHandler):
+                    logger.removeHandler(handler)
+                    try:
+                        handler.close()
+                    except Exception:  # noqa: BLE001 - best-effort cleanup
+                        pass
+        for logger, handler in detached:
+            logger.addHandler(handler)
+
 
 
 @pytest.fixture

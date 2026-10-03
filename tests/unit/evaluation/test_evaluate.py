@@ -32,6 +32,39 @@ class TestLoadTestFeatures:
         with pytest.raises(FileNotFoundError):
             load_test_features(str(tmp_path / "nope.parquet"), sample_config.data)
 
+    def test_excludes_meta_columns_via_sidecar(
+        self, features_parquet_path, sample_config, tmp_path
+    ):
+        """Sidecar drives selection: meta columns (is_imputed) excluded.
+
+        Regression: the legacy "all non-timestamp, non-target" rule kept
+        ``is_imputed`` in X_test (n features + 1), which made the
+        sidecar-trained model raise "Feature shape mismatch" at predict
+        time. Evaluation must resolve columns exactly like training.
+        """
+        from src.common.schema import schema_from_dataframe
+        from src.training.loader import get_feature_names, load_features
+
+        # Rebuild the parquet with a meta column + schema sidecar, mimicking
+        # the real featurise output (features.parquet + features_schema.json).
+        df = pd.read_parquet(features_parquet_path)
+        df["is_imputed"] = False
+        out_path = tmp_path / "with_sidecar" / "features.parquet"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(out_path, index=False)
+        schema = schema_from_dataframe(df, target_col=sample_config.data.target_col)
+        schema.save(out_path.with_name("features_schema.json"))
+
+        X_test, _ = load_test_features(str(out_path), sample_config.data)
+        names = get_feature_names(str(out_path), sample_config.data)
+        assert X_test.shape[1] == len(names)
+        assert "is_imputed" not in names
+        # Identical matrix to what training would feed the model.
+        _, _, _, _, X_test_train, _ = load_features(
+            str(out_path), sample_config.data
+        )
+        np.testing.assert_array_equal(X_test, X_test_train)
+
 
 class TestLogResultsTable:
     def test_logs_metrics(self, caplog):

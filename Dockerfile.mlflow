@@ -8,9 +8,15 @@ WORKDIR /app
 # /api/2.0/mlflow/logged-models endpoint, which 2.x servers do not expose
 # (404). Allowing >=3.14,<4.0 lets newer 3.x releases in while preventing
 # a downgrade below the endpoint that the 3.x client requires.
+# psycopg (3.x) is required: SQLAlchemy >=2.1 resolves postgresql:// URLs
+# to the psycopg3 dialect (PGDialect_psycopg -> `import psycopg`), and
+# without it every tracking-API request 500s with ModuleNotFoundError
+# while /health still returns 200. psycopg2-binary is kept as well in
+# case any dependency still imports it directly.
 RUN pip install --no-cache-dir \
     "mlflow>=3.14,<4.0" \
-    psycopg2-binary>=2.9
+    psycopg2-binary>=2.9 \
+    "psycopg[binary]>=3.1"
 
 EXPOSE 5000
 

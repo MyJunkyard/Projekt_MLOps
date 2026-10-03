@@ -19,6 +19,9 @@ from src.config.models import EntsoeConfig, GenerationMixConfig
 from src.ingestion.entsoe import (
     InvalidBiddingZoneError,
     MissingApiKeyError,
+    _as_utc_index,
+    _entsoe_query_bounds,
+    _resolve_area_tz,
     download_generation_mix,
     generate_synthetic_data,
     generate_synthetic_generation,
@@ -90,6 +93,94 @@ class TestMapGenerationSources:
 
 
 class TestDownloadGenerationMix:
+    def test_query_bounds_use_area_tz_same_instant(self):
+        """Bounds are expressed in the area tz without moving the instant.
+
+        entsoe-py truncates in area tz internally; pandas' truncate compares
+        bound tzinfo objects, so mixed UTC/fixed-offset bounds raise. The
+        same instant converts back to the UTC input exactly.
+        """
+        area_tz = _resolve_area_tz("PL")
+        assert area_tz == "Europe/Warsaw"
+        utc_start = pd.Timestamp("2026-01-01", tz="UTC")
+        utc_end = pd.Timestamp("2026-10-02 17:30", tz="UTC")
+        start, end = _entsoe_query_bounds(utc_start, utc_end, area_tz, "2018-01-01")
+        assert str(start.tzinfo) == area_tz
+        assert str(end.tzinfo) == area_tz
+        assert start.tz_convert("UTC") == utc_start
+        assert end.tz_convert("UTC") == utc_end
+
+    def test_query_bounds_defaults_and_naive_assumed_utc(self):
+        """None bounds resolve to defaults; naive inputs are assumed UTC."""
+        area_tz = _resolve_area_tz("pl ")
+        start, end = _entsoe_query_bounds(None, None, area_tz, "2024-01-01")
+        assert str(start.tzinfo) == area_tz
+        assert start.tz_convert("UTC") == pd.Timestamp("2024-01-01", tz="UTC")
+        naive_start = pd.Timestamp("2024-03-01 00:00")
+        naive_end = pd.Timestamp("2024-03-02 00:00")
+        start2, end2 = _entsoe_query_bounds(
+            naive_start, naive_end, area_tz, "2024-01-01"
+        )
+        assert start2.tz_convert("UTC") == pd.Timestamp("2024-03-01 00:00", tz="UTC")
+        assert end2.tz_convert("UTC") == pd.Timestamp("2024-03-02 00:00", tz="UTC")
+
+    def test_as_utc_index_normalizes_area_tz(self):
+        """Area-tz chunk indexes come back as the same instants in UTC."""
+        idx = pd.date_range("2024-01-01", periods=3, freq="h", tz="Europe/Warsaw")
+        frame = pd.DataFrame({"a": [1.0, 2.0, 3.0]}, index=idx)
+        out = _as_utc_index(frame)
+        assert str(out.index.tz) == "UTC"
+        assert (out.index == idx.tz_convert("UTC")).all()
+
+    def test_area_tz_bounds_survive_dst_spanning_truncate(self):
+        """Regression: DST-spanning truncate works with area-tz bounds.
+
+        2026-01-01 (CET, +01:00) .. 2026-10-02 (CEST, +02:00) against a
+        Europe/Warsaw index — the exact shape that raised "Both dates must
+        have the same UTC offset" with mixed UTC/fixed-offset bounds.
+        """
+        idx = pd.date_range(
+            "2026-01-01", periods=24 * 300, freq="h", tz="Europe/Warsaw"
+        )
+        df = pd.DataFrame({"a": range(len(idx))}, index=idx)
+        start, end = _entsoe_query_bounds(
+            pd.Timestamp("2026-01-01", tz="UTC"),
+            pd.Timestamp("2026-10-02 17:30", tz="UTC"),
+            "Europe/Warsaw",
+            "2018-01-01",
+        )
+        # This is entsoe-py's internal call shape: must not raise.
+        out = df.truncate(before=start, after=end)
+        assert len(out) > 0
+
+    @mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}, clear=False)
+    @mock.patch("src.ingestion.entsoe.EntsoeClient")
+    def test_download_passes_area_tz_bounds_returns_utc(
+        self, mock_client_class
+    ):
+        """Client gets area-tz bounds; our frame timestamp stays UTC."""
+        mock_client = mock.MagicMock()
+        mock_client_class.return_value = mock_client
+        idx = pd.date_range("2024-01-01", periods=24, freq="h", tz="Europe/Warsaw")
+        mock_client.query_generation.return_value = pd.DataFrame(
+            {"Wind Onshore": np.linspace(100, 200, 24)}, index=idx
+        )
+
+        df = download_generation_mix(
+            _entsoe_cfg("2024-01-01"),
+            ["wind"],
+            start=pd.Timestamp("2024-01-01", tz="UTC"),
+            end=pd.Timestamp("2024-01-02", tz="UTC"),
+        )
+        _, kwargs = mock_client.query_generation.call_args
+        assert str(kwargs["start"].tzinfo) == "Europe/Warsaw"
+        assert str(kwargs["end"].tzinfo) == "Europe/Warsaw"
+        # Same instants as the UTC inputs: midnight UTC == 01:00 Warsaw.
+        assert kwargs["start"].tz_convert("UTC") == pd.Timestamp(
+            "2024-01-01", tz="UTC"
+        )
+        assert str(df["timestamp"].dt.tz) == "UTC"
+
     @mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "test-key"}, clear=False)
     @mock.patch("src.ingestion.entsoe.EntsoeClient")
     def test_year_chunking_queries_per_year(self, mock_client_class):
@@ -331,6 +422,54 @@ class TestIngestGenerationMix:
             assert mock_dl.call_count == 1
             assert source2 == "entsoe"
             assert len(df2) == 48
+
+    def test_cache_hit_drops_sources_removed_from_config(self, tmp_path):
+        """Positive: a cache wider than the config returns only wanted cols.
+
+        A stale cache written before a source was dropped (e.g. 'nuclear'
+        removed from ``features.generation_mix.sources``) must not leak its
+        all-NaN column back into the frame — ``data.drop_long_gaps`` would
+        then delete every row at ingest.
+        """
+        wide = pd.DataFrame(
+            {
+                "timestamp": pd.date_range(
+                    "2024-01-01", periods=48, freq="h", tz="UTC"
+                ),
+                "wind_mw": np.linspace(100, 200, 48),
+                "nuclear_mw": np.nan,  # stale column from an older config
+            }
+        )
+        with (
+            mock.patch.dict("os.environ", {"ENTSOE_API_KEY": "k"}, clear=False),
+            mock.patch(
+                "src.ingestion.entsoe.download_generation_mix",
+                return_value=wide,
+            ) as mock_dl,
+        ):
+            # First call writes the wider cache (sources listed as given).
+            ingest_generation_mix(
+                GenerationMixConfig.model_validate(
+                    {"enabled": True, "sources": ["wind", "nuclear"]}
+                ),
+                _entsoe_cfg(),
+                tmp_path,
+                pd.Timestamp("2024-01-01", tz="UTC"),
+                pd.Timestamp("2024-01-02", tz="UTC"),
+            )
+            # Second call with 'nuclear' dropped from the config: cache hit
+            # must return only the configured columns.
+            df, source = ingest_generation_mix(
+                GenerationMixConfig(enabled=True, sources=["wind"]),
+                _entsoe_cfg(),
+                tmp_path,
+                pd.Timestamp("2024-01-01", tz="UTC"),
+                pd.Timestamp("2024-01-02", tz="UTC"),
+            )
+            assert mock_dl.call_count == 1
+        assert source == "entsoe"
+        assert list(df.columns) == ["timestamp", "wind_mw"]
+        assert "nuclear_mw" not in df.columns
 
     def test_no_api_key_falls_back_to_synthetic(self, tmp_path):
         """Positive: no API key + explicit opt-in → synthetic frame cached."""

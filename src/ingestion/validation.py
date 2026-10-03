@@ -13,10 +13,12 @@ from src.config.models import DataConfig, TemporalConfig
 MODULE_LOGGER_NAME = "src.ingestion.validation"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
 
-# Plausible price range for European day-ahead electricity prices (EUR/MWh).
-# Negative prices occur (e.g. wind surplus); extreme outliers indicate errors.
-PRICE_MIN = -500.0
-PRICE_MAX = 500.0
+# TODO: design a proper scheme for catching ingested data errors (e.g.
+# cross-checking against a second source, statistical anomaly detection, or
+# unit/currency metadata from the API response). A hardcoded plausible-price
+# range was removed: it rejected genuine market extremes (2022 crisis peaks,
+# negative-price hours), and without an independent source to compare against
+# we ultimately trust the ENTSO-E response anyway.
 
 
 def validate_schema(df: pd.DataFrame) -> bool:
@@ -100,7 +102,7 @@ def validate_schema(df: pd.DataFrame) -> bool:
 def validate_entsoe_data(
     df: pd.DataFrame, data: DataConfig, temporal: TemporalConfig
 ) -> bool:
-    """Validate ENTSO-E data for gaps, outliers, and timezone correctness.
+    """Validate ENTSO-E data for gaps and timezone correctness.
 
     Required DataFrame contract:
         - ``timestamp``: tz-aware UTC datetime column, no duplicates.
@@ -118,7 +120,6 @@ def validate_entsoe_data(
       about, not raised on — the gap-filling stage (``fill_gaps``) is the
       component responsible for handling them. Raising here would make the
       long-gap warn path in ``fill_gaps`` dead code for real data.
-    - Prices within plausible range (PRICE_MIN to PRICE_MAX)
 
     Args:
         df: DataFrame to validate (contract above).
@@ -205,22 +206,9 @@ def validate_entsoe_data(
             max_gap,
         )
 
-    # Outlier detection
-    prices = df_sorted["price_eur_mwh"]
-    if prices.min() < PRICE_MIN or prices.max() > PRICE_MAX:
-        logger.error(
-            "ENTSO-E validation failed: price out of range "
-            "(min=%.2f, max=%.2f, expected [%.1f, %.1f])",
-            prices.min(),
-            prices.max(),
-            PRICE_MIN,
-            PRICE_MAX,
-        )
-        raise ValueError(
-            f"Price outliers detected: min={prices.min():.2f}, "
-            f"max={prices.max():.2f}. Expected range: "
-            f"[{PRICE_MIN}, {PRICE_MAX}]"
-        )
+    # Note: no hardcoded price-range check here by design — real market
+    # extremes (crisis peaks, negative-price hours) would be rejected by any
+    # fixed bound. See the module-level TODO for a proper data-error scheme.
 
     logger.debug(
         "ENTSO-E validation passed (%d rows, max gap %s)", len(df), max_gap
