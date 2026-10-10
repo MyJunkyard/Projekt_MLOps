@@ -1,47 +1,67 @@
-"""
-features/derivatives.py — Derivative (difference) features of the target.
+"""features/derivatives.py — Derivative (difference) features of the target.
 
-Holds the existing ``add_derivative_features`` moved verbatim from
-``featurise.py`` (Workstream 0 module restructure). Further time
-derivatives and derived signals are planned for Stage 4 (EXP-008+);
-new code of this role belongs here.
+Raw price derivatives amplify noise, so the target is smoothed with a short
+rolling mean before differencing. Because the useful smoothing horizon is not
+one-size-fits-all, WS0 made the window a *list*: every ``(order, window)``
+pair yields its own column, and the run book selects the variant that works
+via ``features.select`` (EXP-008/009).
+
+Naming is ``{target_col}_diff_{order}_w{window}`` — the window suffix is
+mandatory, never implied. A bare ``price_diff_1`` would be ambiguous the
+moment a second window exists, so it is never produced.
 """
 
 import pandas as pd
+
+
+def make_derivative_name(target_col: str, order: int, window: int) -> str:
+    """Build the derivative column name for one ``(order, window)`` pair.
+
+    Args:
+        target_col: Name of the target column.
+        order: Difference order (1 = velocity, 2 = acceleration).
+        window: Rolling-mean window applied before differencing.
+
+    Returns:
+        The column name, e.g. ``price_eur_mwh_diff_1_w3``.
+    """
+    return f"{target_col}_diff_{order}_w{window}"
 
 
 def add_derivative_features(
     df: pd.DataFrame,
     target_col: str,
     order: list[int] | None = None,
-    smooth_window: int = 3,
+    smooth_windows: list[int] | None = None,
 ) -> pd.DataFrame:
     """Add derivative (difference) features of the target variable.
 
-    Raw price derivatives amplify noise. Before computing:
-    1. Apply a short rolling mean (window=smooth_window) to smooth
-    2. Then compute diff(1) for first derivative, diff(2) for second
-
-    Conceptually: first derivative = price velocity (rising/falling)
-    Second derivative = price acceleration (speeding up/slowing down)
+    Conceptually: first derivative = price velocity (rising/falling),
+    second derivative = price acceleration (speeding up/slowing down). Each
+    smoothing window is a separate variant, so a config asking for orders
+    ``[1, 2]`` and windows ``[3, 6]`` produces four columns.
 
     Args:
         df: DataFrame containing ``target_col``, sorted by ``timestamp``
             (differences are order-dependent).
         target_col: Name of the target column.
-        order: List of derivative orders to compute (1, 2, or both).
-        smooth_window: Rolling mean window before differencing.
+        order: Derivative orders to compute (1, 2, or both). Defaults to
+            ``[1, 2]``.
+        smooth_windows: Rolling-mean windows to apply before differencing,
+            one column per window. Defaults to ``[3]``.
 
     Returns:
-        The same DataFrame (mutated in place and returned) with float
-        columns ``{target_col}_diff_{n}`` added for each order ``n``.
+        The same DataFrame (mutated in place and returned) with float columns
+        ``{target_col}_diff_{n}_w{w}`` for every order/window pair.
     """
-    # Smooth the target to reduce noise
     if order is None:
         order = [1, 2]
-    smoothed = df[target_col].rolling(window=smooth_window, min_periods=1).mean()
+    if smooth_windows is None:
+        smooth_windows = [3]
 
-    for n in order:
-        df[f"{target_col}_diff_{n}"] = smoothed.diff(n)
+    for window in smooth_windows:
+        smoothed = df[target_col].rolling(window=window, min_periods=1).mean()
+        for n in order:
+            df[make_derivative_name(target_col, n, window)] = smoothed.diff(n)
 
     return df

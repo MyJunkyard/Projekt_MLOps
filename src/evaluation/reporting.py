@@ -10,9 +10,11 @@ import mlflow
 import numpy as np
 import pandas as pd
 
-from src.common.splits import get_split_masks
-from src.config.models import DataConfig, PipelineConfig
-from src.training.loader import get_feature_names
+from src.common.schema import FeatureSchema
+from src.common.superset import selection_summary
+from src.config.models import PipelineConfig
+from src.training.loader import resolve_selection
+from src.training.registry import read_feature_schema
 
 MODULE_LOGGER_NAME = "src.evaluation.reporting"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
@@ -110,42 +112,103 @@ def _log_metrics_and_artifacts(
         logger.debug("Artifact logged: %s", path)
 
 
-def load_test_features(
-    path: str, data: DataConfig
-) -> tuple[np.ndarray, np.ndarray]:
-    """Load test split from features.parquet.
+def resolve_evaluate_columns(
+    cfg: PipelineConfig, schema: FeatureSchema
+) -> tuple[list[str], FeatureSchema]:
+    """Resolve which feature columns the champion model expects.
 
-    Input contract: the Parquet must contain the featurisation output
-    schema — a tz-aware ``timestamp`` column, the ``data.target_col``
-    target column, and one column per feature.
+    WS0 decision D-c: the model-instance link is the *subset schema logged
+    with the run*, not a copy of the data. Evaluation therefore reads the
+    champion run's ``config/features_schema.json`` artifact and uses exactly
+    those columns, falling back to the config ``features.select`` when the
+    artifact cannot be found.
 
     Args:
-        path: Path to the features Parquet file.
-        data: ``DataConfig`` with ``target_col`` and split dates
-            (``train_end``, ``val_end``).
+        cfg: The validated ``PipelineConfig`` (uses ``mlflow``/``serving``
+            sections and ``features.select``).
+        schema: The full superset schema read from disk.
 
     Returns:
-        A tuple ``(X_test, y_test)`` of numpy arrays: ``X_test`` of
-        shape (n_test, n_features) and 1-D ``y_test`` of shape
-        (n_test,).
+        A tuple ``(feature_cols, subset_schema)`` where ``feature_cols`` is
+        ordered canonically and ``subset_schema`` is the schema restricted to
+        those columns.
+
+    Raises:
+        ValueError: If the run's columns are absent from the current superset
+            (the superset was rebuilt without a needed feature block, or the
+            champion model was trained against a different superset).
     """
-    df = pd.read_parquet(path)
+    available = set(schema.feature_names())
+    run_schema: FeatureSchema | None = None
+    run_id = get_model_run_id(cfg)
 
-    target_col = data.target_col
-    _, _, test_mask = get_split_masks(df, data)
-    df_test = df.iloc[test_mask]
+    if run_id is not None:
+        run_schema = read_feature_schema(run_id, artifact_root=None)
 
-    y_test = df_test[target_col].values
-    # Same column resolution as the training stage (schema sidecar first,
-    # legacy fallback with a WARNING) so the model sees exactly the columns
-    # it was fitted on — the legacy "all non-timestamp, non-target" rule
-    # alone would include meta columns (e.g. is_imputed) and raise
-    # "Feature shape mismatch" against a sidecar-trained model.
-    feature_cols = get_feature_names(path, data)
-    X_test = df_test[feature_cols].values
+    if run_schema is not None:
+        feature_cols = run_schema.feature_names()
+        logger.info(
+            "Feature columns taken from champion run %s (%d columns)",
+            run_id,
+            len(feature_cols),
+        )
+    else:
+        feature_cols = resolve_selection(schema, cfg.features.select)
+        logger.warning(
+            "No feature schema on the champion run; falling back to config "
+            "features.select (%s)",
+            selection_summary(cfg.features.select, feature_cols),
+        )
+
+    missing = [c for c in feature_cols if c not in available]
+    if missing:
+        raise ValueError(
+            f"The champion model expects {len(missing)} column(s) that are not "
+            f"in the current superset: {missing}. Either the superset was "
+            "rebuilt without the relevant feature block (re-run `make "
+            "featurise` with it enabled) or the champion model was trained "
+            "against a different superset (re-train)."
+        )
+
+    subset = schema.subset(feature_cols)
+    logger.info(
+        "Evaluation selection: %s", selection_summary(cfg.features.select, feature_cols)
+    )
+    return subset.feature_names(), subset
+
+
+def load_test_features(
+    frame: pd.DataFrame, feature_cols: list[str], target_col: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Select the model's feature columns and the target from a clean frame.
+
+    Args:
+        frame: Row-aligned frame (superset restricted to the resolved
+            selection, already NaN-filtered — see ``resolve_evaluate_columns``).
+        feature_cols: Resolved feature columns (the model's input contract).
+        target_col: Name of the target column.
+
+    Returns:
+        A tuple ``(X_test, y_test)`` of numpy arrays: ``X_test`` of shape
+        (n_test, n_features) and 1-D ``y_test`` of shape (n_test,).
+
+    Raises:
+        ValueError: If any resolved feature column is absent from the frame.
+    """
+    missing = [c for c in feature_cols if c not in frame.columns]
+    if missing:
+        raise ValueError(
+            f"Test frame is missing {len(missing)} feature column(s) the model "
+            f"was trained on: {missing}. The superset on disk no longer "
+            "contains them — re-run `make featurise` with the relevant feature "
+            "block enabled, or re-train against the current superset."
+        )
+
+    y_test = frame[target_col].values
+    X_test = frame[feature_cols].values
 
     logger.info(
-        "Test set: %s rows, %d features", f"{len(df_test):,}", len(feature_cols)
+        "Test set: %s rows, %d features", f"{len(frame):,}", len(feature_cols)
     )
     return X_test, y_test
 

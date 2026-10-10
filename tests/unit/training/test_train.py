@@ -20,10 +20,11 @@ from src.training.baselines import (
     train_baseline_seasonal_naive,
 )
 from src.training.loader import (
-    get_feature_names,
     get_git_commit_hash,
-    load_features,
     load_model,
+    load_superset_features,
+    open_superset,
+    resolve_selection,
 )
 from src.training.registry import log_feature_importances, log_to_mlflow
 
@@ -59,41 +60,56 @@ class TestLoadModel:
             load_model(model_cfg)
 
 
-class TestGetFeatureNames:
-    def test_returns_feature_names(self, features_parquet_path, sample_config):
-        """Positive: returns all feature column names."""
-        names = get_feature_names(features_parquet_path, sample_config.data)
+class TestResolveSelection:
+    def test_none_selects_every_feature(self, superset_dir, sample_config):
+        """Positive: ``select: null`` resolves to every FEATURE-role column."""
+        _, schema = open_superset(sample_config)
+        names = resolve_selection(schema, None)
         assert "hour" in names
         assert "lag_1h" in names
         assert "price_eur_mwh" not in names
         assert "timestamp" not in names
 
+    def test_explicit_columns(self, superset_dir, sample_config):
+        """Positive: an explicit column list resolves to exactly those names."""
+        from src.config.models import FeatureSelection
 
-class TestLoadFeatures:
-    def test_returns_correct_shapes(self, features_parquet_path, sample_config):
-        """Positive: returns X/y splits with expected shapes."""
-        X_train, y_train, X_val, y_val, X_test, y_test = load_features(
-            features_parquet_path, sample_config.data
+        _, schema = open_superset(sample_config)
+        names = resolve_selection(schema, FeatureSelection(columns=["hour", "lag_1h"]))
+        assert names == ["hour", "lag_1h"]
+
+    def test_unknown_column_raises(self, superset_dir, sample_config):
+        """Negative: a column absent from the superset is rejected."""
+        from src.config.models import FeatureSelection
+
+        _, schema = open_superset(sample_config)
+        with pytest.raises(ValueError, match="not_in_superset"):
+            resolve_selection(schema, FeatureSelection(columns=["not_in_superset"]))
+
+
+class TestLoadSupersetFeatures:
+    def test_returns_correct_shapes(self, superset_dir, sample_config):
+        """Positive: X/y splits are row-aligned and cover the cleaned frame."""
+        X_splits, y_splits, feature_cols, subset_schema, clean = (
+            load_superset_features(sample_config)
         )
-        assert X_train.shape[0] == y_train.shape[0]
-        assert X_val.shape[0] == y_val.shape[0]
-        assert X_test.shape[0] == y_test.shape[0]
-        total = X_train.shape[0] + X_val.shape[0] + X_test.shape[0]
-        assert total == len(pd.read_parquet(features_parquet_path))
+        for X, y in zip(X_splits, y_splits, strict=True):
+            assert X.shape[0] == y.shape[0]
+        assert sum(X.shape[0] for X in X_splits) == len(clean)
+        assert feature_cols == subset_schema.feature_names()
 
-    def test_excludes_target_and_timestamp(self, features_parquet_path, sample_config):
-        """Positive: feature matrix excludes target and timestamp columns."""
-        X_train, *_ = load_features(features_parquet_path, sample_config.data)
-        df = pd.read_parquet(features_parquet_path)
-        feature_cols = [
-            c for c in df.columns if c not in ["price_eur_mwh", "timestamp"]
-        ]
-        assert X_train.shape[1] == len(feature_cols)
+    def test_excludes_target_and_timestamp(self, superset_dir, sample_config):
+        """Positive: the feature matrix excludes target and timestamp."""
+        X_splits, _, _, _, _ = load_superset_features(sample_config)
+        assert X_splits[0].shape[1] == 9
+        assert "price_eur_mwh" not in X_splits[0].columns
+        assert "timestamp" not in X_splits[0].columns
 
-    def test_missing_file_raises(self, tmp_path, sample_config):
-        """Negative: missing parquet raises FileNotFoundError."""
+    def test_missing_superset_raises(self, tmp_path, sample_config):
+        """Negative: no superset on disk is an actionable FileNotFoundError."""
+        sample_config.data.superset_dir = str(tmp_path / "absent") + "/"
         with pytest.raises(FileNotFoundError):
-            load_features(str(tmp_path / "nope.parquet"), sample_config.data)
+            load_superset_features(sample_config)
 
 
 class TestGetGitCommitHash:
@@ -104,14 +120,14 @@ class TestGetGitCommitHash:
         assert len(result) > 0
 
     @mock.patch(
-        "src.training.loader.subprocess.run", side_effect=FileNotFoundError
+        "src.common.hashing.subprocess.run", side_effect=FileNotFoundError
     )
     def test_returns_unknown_when_not_git(self, mock_run):
         """Negative: returns 'unknown' when git is unavailable."""
         assert get_git_commit_hash() == "unknown"
 
     @mock.patch(
-        "src.training.loader.subprocess.run",
+        "src.common.hashing.subprocess.run",
         side_effect=subprocess.CalledProcessError(1, "git"),
     )
     def test_returns_unknown_on_error(self, mock_run):

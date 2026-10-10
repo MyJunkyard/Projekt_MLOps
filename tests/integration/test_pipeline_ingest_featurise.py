@@ -1,5 +1,5 @@
 """
-Integration tests — raw CSV → features.parquet flow.
+Integration tests — raw CSV → featurise flow.
 
 Exercises the interaction between the ingestion and features packages
 using temporary files and in-memory config (no real data or params.yaml).
@@ -18,7 +18,7 @@ from src.features.calendar import (
 from src.features.lags import add_lag_features, add_rolling_features
 from src.features.main import (
     load_raw_data,
-    save_processed_data,
+    save_reference_data,
     train_val_test_split,
 )
 from src.ingestion.entsoe import download_entsoe_data, generate_synthetic_data
@@ -52,15 +52,15 @@ class TestIngestToFeaturise:
 
         train, val, test = train_val_test_split(loaded, sample_config.data)
 
-        processed = tmp_path / "processed" / "features.parquet"
         reference = tmp_path / "reference" / "reference.parquet"
-        save_processed_data(train, val, test, str(processed), str(reference))
+        save_reference_data(train, str(reference))
 
         # --- Assertions ---
-        assert processed.exists()
+        # WS0: featurise materialises the superset + a select-agnostic
+        # reference split; the concatenated features.parquet is gone.
         assert reference.exists()
 
-        features = pd.read_parquet(processed)
+        features = loaded
         assert len(features) == len(train) + len(val) + len(test)
         assert "hour" in features.columns
         assert "lag_1h" in features.columns
@@ -138,12 +138,11 @@ class TestEntsoeToFeaturise:
 
         train, val, test = train_val_test_split(loaded, cfg.data)
 
-        processed = tmp_path / "processed" / "features.parquet"
         reference = tmp_path / "reference" / "reference.parquet"
-        save_processed_data(train, val, test, str(processed), str(reference))
+        save_reference_data(train, str(reference))
 
-        assert processed.exists()
-        features = pd.read_parquet(processed)
+        assert reference.exists()
+        features = loaded
         assert "is_holiday" in features.columns
         assert "days_to_next_holiday" in features.columns
         assert "days_since_last_holiday" in features.columns

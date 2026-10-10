@@ -1,6 +1,6 @@
 data:
   raw_path: data/raw/
-  processed_path: data/processed/features.parquet
+  superset_dir: data/processed/superset/  # WS0: featurise materialises; train/evaluate read
   reference_path: data/reference/reference.parquet
   target_col: price_eur_mwh
   date_col: timestamp
@@ -35,27 +35,36 @@ temporal:
   # horizon=24 at hourly resolution = predict next 24 hours
   # horizon=7  at daily  resolution = predict next week
   # horizon=4  at weekly resolution = predict next month (approx)
+  strategy: single_step         # single_step | direct | shared (WS1)
+  # single_step = today's behaviour (fit X_t -> y_t), horizon ignored for training
+  # direct      = train H separate models, model h predicts y_{t+h}
+  # shared      = one model with `horizon_step` as a feature (1..H)
 
 features:
   calendar:
     enabled: true
     include: [hour, day_of_week, month, week_of_year, is_holiday, is_workday,
-               days_to_next_holiday, days_since_last_holiday]
+               days_to_next_holiday, days_since_last_holiday, is_long_weekend]
   weather:
-    enabled: false              # toggle for ablation experiments
+    enabled: true               # materialise-all (WS0): enabled = what the superset contains
     variables: [temperature_2m, wind_speed_100m, shortwave_radiation, cloud_cover,
                 precipitation]
     locations: [warsaw, krakow, gdansk, wroclaw]
     allow_synthetic: false      # explicit opt-in: synthetic weather on download failure
                                 # (mixed real+synthetic runs are rejected at ingest)
+    derivatives:                # WS3: smoothed weather derivatives (EXP-011)
+      enabled: false
+      variables: [wind_speed_100m]   # subset of weather.variables (validated when enabled)
+      order: [1]
+      smooth_windows: [3]
   lags:
     enabled: true               # Stage 2: enable lag features
     periods: [1, 2, 3, 24, 48, 168]   # hours (168 = 1 week)
     rolling_windows: [24, 168]  # trailing windows for rolling mean/std
   derivatives:
-    enabled: false              # toggle for ablation experiments
+    enabled: true               # WS0: superset materialises all smoothing windows
     order: [1, 2]              # first and second derivative
-    smooth_window: 3            # smoothing before differencing to reduce noise
+    smooth_windows: [3, 6, 12]  # EXP-010 becomes a selection, not a re-featurise
   generation_mix:
     enabled: true               # ENTSO-E generation by source (WS4)
     # No 'nuclear': Poland has no operating nuclear plants, so ENTSO-E
@@ -64,6 +73,7 @@ features:
     sources: [wind, solar, coal, gas, hydro]
   cross_border_flows:
     enabled: false
+    neighbours: [DE_LU, CZ, SK, LT, SE_4]   # ENTSO-E Area codes (typo-checked at load)
   # Real-time publication lag (hours) per raw external column (WS4).
   # The alignment block in build_features replaces each configured raw
   # column with {col}_lag{L}h — the value actually known at prediction
@@ -77,6 +87,10 @@ features:
     hydro_mw: 1
     solar_mw: 1
     wind_mw: 1
+  # The columns THIS run trains on (WS0): {groups: [...], columns: [...]}.
+  # Read by train/evaluate only — never triggers ingest or featurise.
+  # null = all feature columns in the materialised superset (today's behaviour).
+  select: null
 
 model:
   # Stage 2: XGBoost for real model
@@ -97,6 +111,11 @@ evaluation:
     - day_of_week
     - month
     - is_holiday                   # added in Stage 2 when real holiday data is available
+  residual_quantiles: 5             # WS4: price-quantile residual bins (0 disables)
+  sample_week: "2024-03-04"         # WS4: ISO week-start for the sample actual-vs-predicted window
+  run_analysis_after_train: true    # WS4: train() runs the shared residual analysis
+  naive_period: 168                 # WS7: seasonal-naive lag in native steps (for rmae/mase)
+  dm_test: true                     # WS7: Diebold-Mariano significance vs the reference run
 
 mlflow:
   tracking_uri: http://localhost:5000

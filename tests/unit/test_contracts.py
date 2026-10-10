@@ -10,10 +10,11 @@ Boundaries covered:
 
 1. ``TestIngestOutputContract`` — ``ingestion.main.main()`` output:
    ``data/raw/entsoe_prices.csv`` + ``manifest.json``.
-2. ``TestFeaturiseOutputContract`` — ``features.main.build_features()``
-   output: the features DataFrame + its ``FeatureSchema`` sidecar.
-3. ``TestTrainInputContract`` — ``training.loader.load_features()``
-   arrays vs ``get_feature_names`` / ``get_split_masks``.
+2. ``TestFeaturiseOutputContract`` — ``features.main.build_features()`` +
+   ``materialize_superset()`` output: the superset parquet, its
+   ``FeatureSchema`` sidecar and ``manifest.json`` (WS0, scheme B).
+3. ``TestTrainInputContract`` — ``training.loader.load_superset_features()``
+   arrays vs ``resolve_selection`` / ``get_split_masks``.
 
 All tests are fully offline: ENTSO-E downloads are mocked (or the API
 key is blanked so the synthetic fallback runs), and weather frames are
@@ -22,7 +23,6 @@ built in memory — ``pytest`` never touches the network.
 
 import hashlib
 import json
-import logging
 import os
 from contextlib import ExitStack
 from pathlib import Path
@@ -33,16 +33,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.common.schema import ColumnRole
+from src.common.schema import ColumnRole, FeatureSchema
 from src.common.splits import get_split_masks
-from src.config.models import PipelineConfig
-from src.features.main import (
-    build_features,
-    save_processed_data,
-    train_val_test_split,
-)
+from src.config.models import FeatureSelection, PipelineConfig
+from src.features.main import build_features, train_val_test_split
 from src.ingestion.main import main as ingest_main
-from src.training.loader import get_feature_names, load_features
+from src.training.loader import (
+    drop_selected_nan_rows,
+    load_superset_features,
+    resolve_selection,
+)
 
 # ---------------------------------------------------------------------------
 # Contract vocabulary (docs/contracts.md §3)
@@ -72,6 +72,7 @@ ROLLING_WINDOWS = [24]
 def _make_config(
     *,
     raw_path=None,
+    superset_dir=None,
     include_load=True,
     add_is_imputed=True,
     allow_synthetic=False,
@@ -82,7 +83,8 @@ def _make_config(
     ``feature_sections`` are merged into the ``features`` mapping (keys
     such as ``calendar``, ``lags``, ``derivatives``, ``weather``,
     ``generation_mix``, ``availability_lags``), so each test states
-    exactly the flags whose contract it pins.
+    exactly the flags whose contract it pins. ``raw_path`` and
+    ``superset_dir`` belong to ``data`` and are routed there.
     """
     data = {
         "target_col": "price_eur_mwh",
@@ -98,6 +100,8 @@ def _make_config(
     }
     if raw_path is not None:
         data["raw_path"] = str(raw_path)
+    if superset_dir is not None:
+        data["superset_dir"] = str(superset_dir)
     return PipelineConfig.model_validate(
         {
             "data": data,
@@ -254,25 +258,59 @@ def _manifest_of(cfg):
 
 
 def _write_features(tmp_path, cfg, raw, weather=None):
-    """build_features → split → save parquet + schema sidecar.
+    """build_features → materialise superset (+ reference) for a temp config.
 
-    Returns ``(features_parquet_path, schema_path, schema)``.
+    WS0 (scheme B): the featurise output contract is the superset, not a
+    single ``features.parquet``. NaNs are retained by design; the reference
+    dataset is the union-dropna train split.
+
+    Returns ``(superset_parquet_path, schema_path, schema)``.
     """
+    from src.features.main import materialize_superset, save_reference_data
+
     out, schema = build_features(
-        raw, cfg.features, cfg.data.target_col, weather=weather
+        raw, cfg.features, cfg.data.target_col, weather=weather, drop_na=False
     )
-    train, val, test = train_val_test_split(out, cfg.data)
-    processed = tmp_path / "processed" / "features.parquet"
-    save_processed_data(
-        train,
-        val,
-        test,
-        str(processed),
+    paths = materialize_superset(
+        out, schema, cfg, config_path=str(tmp_path / "params.yaml")
+    )
+    save_reference_data(
+        train_val_test_split(out, cfg.data)[0],
         str(tmp_path / "reference" / "reference.parquet"),
     )
-    schema_path = processed.with_name("features_schema.json")
-    schema.save(schema_path)
-    return str(processed), schema_path, schema
+    return str(paths.parquet), paths.schema, schema
+
+
+def _schema_of(superset_parquet_path) -> FeatureSchema:
+    """Read the sidecar that sits next to a superset parquet.
+
+    Args:
+        superset_parquet_path: Path to ``features_{resolution}.parquet``.
+
+    Returns:
+        The ``FeatureSchema`` loaded from the sibling ``_schema.json`` file.
+    """
+    sidecar = Path(str(superset_parquet_path)).with_name(
+        Path(str(superset_parquet_path)).name.replace(".parquet", "_schema.json")
+    )
+    return FeatureSchema.from_file(sidecar)
+
+
+def _superset_config(tmp_path, cfg, **flags):
+    """Build a config pointed at a temp superset dir with feature flags set.
+
+    Args:
+        tmp_path: Pytest temp directory.
+        cfg: Base config to copy (``sample_config``).
+        **flags: ``**kwargs`` merged into the config dict.
+
+    Returns:
+        A validated ``PipelineConfig`` writing to ``tmp_path``.
+    """
+    return _make_config(
+        superset_dir=str(tmp_path / "superset") + "/",
+        **flags,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -477,15 +515,19 @@ class TestFeaturiseOutputContract:
         assert rolling_cols == {"rolling_mean_24h", "rolling_std_24h"}
 
     def test_derivative_columns_when_enabled(self):
-        """Positive: {target}_diff_{n} for each configured order."""
+        """Positive: {target}_diff_{n}_w{window} for each order × window."""
         raw = _raw_df()
         cfg = _make_config(
-            derivatives={"enabled": True, "order": [1, 2], "smooth_window": 3}
+            derivatives={
+                "enabled": True,
+                "order": [1, 2],
+                "smooth_windows": [3],
+            }
         )
         out, _ = build_features(raw, cfg.features, cfg.data.target_col)
         assert set(out.columns) - set(raw.columns) == {
-            "price_eur_mwh_diff_1",
-            "price_eur_mwh_diff_2",
+            "price_eur_mwh_diff_1_w3",
+            "price_eur_mwh_diff_2_w3",
         }
 
     def test_weather_columns_when_enabled(self):
@@ -550,7 +592,7 @@ class TestFeaturiseOutputContract:
             **_lags_flags(),
             **_generation_flags(),
             **_weather_flags(),
-            derivatives={"enabled": True, "order": [1, 2], "smooth_window": 3},
+            derivatives={"enabled": True, "order": [1, 2], "smooth_windows": [3]},
         )
         out, schema = build_features(
             raw, cfg.features, cfg.data.target_col, weather=_weather_frames(raw)
@@ -581,7 +623,7 @@ class TestFeaturiseOutputContract:
             **_lags_flags(),
             **_generation_flags(),
             **_weather_flags(),
-            derivatives={"enabled": True, "order": [1, 2], "smooth_window": 3},
+            derivatives={"enabled": True, "order": [1, 2], "smooth_windows": [3]},
         )
         out, schema = build_features(
             raw, cfg.features, cfg.data.target_col, weather=_weather_frames(raw)
@@ -592,7 +634,7 @@ class TestFeaturiseOutputContract:
             | {"load_mw_lag1h", "wind_mw_lag1h", "solar_mw_lag1h"}
             | {"warsaw__temperature_2m", "warsaw__wind_speed_100m"}
             | {"lag_1h", "lag_24h", "rolling_mean_24h", "rolling_std_24h"}
-            | {"price_eur_mwh_diff_1", "price_eur_mwh_diff_2"}
+            | {"price_eur_mwh_diff_1_w3", "price_eur_mwh_diff_2_w3"}
         )
         assert set(out.columns) == expected
         # The final dropna gate leaves no NaN anywhere (§3 / decision D6).
@@ -611,65 +653,106 @@ class TestFeaturiseOutputContract:
 
 
 class TestTrainInputContract:
-    """Pin the 'train/evaluate input' row of docs/contracts.md §3."""
+    """Pin the 'train/evaluate input' row of docs/contracts.md §3.
+
+    WS0 (scheme B): the train input is the materialised superset narrowed by
+    ``features.select``. All three files are required — a missing parquet,
+    sidecar or manifest is an actionable error, never a silent fallback.
+    """
 
     @pytest.fixture
     def feature_bundle(self, tmp_path):
-        """features.parquet + schema sidecar from a contract-shaped frame."""
+        """Materialise a superset from a contract-shaped frame.
+
+        Returns ``(superset_path, schema_path, schema, cfg)`` where ``cfg``
+        already points at the temp superset directory.
+        """
         raw = _raw_df()
-        cfg = _make_config(**_calendar_flags(), **_lags_flags())
+        cfg = _superset_config(
+            tmp_path, _make_config(), **_calendar_flags(), **_lags_flags()
+        )
         path, schema_path, schema = _write_features(tmp_path, cfg, raw)
         return path, schema_path, schema, cfg
 
-    def test_feature_count_matches_get_feature_names(self, feature_bundle):
-        """Positive: X column count equals len(get_feature_names(...))."""
+    def test_feature_count_matches_resolved_selection(self, feature_bundle):
+        """Positive: X column count equals the resolved selection length."""
         path, _, _, cfg = feature_bundle
-        names = get_feature_names(path, cfg.data)
-        X_train, _, X_val, _, X_test, _ = load_features(path, cfg.data)
+        schema = _schema_of(path)
+        names = resolve_selection(schema, cfg.features.select)
+        X_splits, _, feature_cols, _, _ = load_superset_features(cfg)
         assert len(names) > 0
-        assert X_train.shape[1] == len(names)
-        assert X_val.shape[1] == len(names)
-        assert X_test.shape[1] == len(names)
+        assert feature_cols == names
+        assert all(X.shape[1] == len(names) for X in X_splits)
 
     def test_row_counts_match_split_masks(self, feature_bundle):
-        """Positive: split array lengths equal the split masks exactly."""
+        """Positive: split array lengths equal the split masks exactly.
+
+        The masks are computed on the same post-dropna frame the loader
+        builds: the superset keeps warm-up NaNs, and the loader drops rows
+        NaN in the *selected* columns (WS0 decision D0/D-b). Counting masks
+        on the raw superset would overstate the train rows.
+        """
         path, _, _, cfg = feature_bundle
         df = pd.read_parquet(path)
+        feature_cols = load_superset_features(cfg)[2]
+        df = drop_selected_nan_rows(df, feature_cols, cfg.data.target_col)
         train_mask, val_mask, test_mask = get_split_masks(df, cfg.data)
-        X_train, y_train, X_val, y_val, X_test, y_test = load_features(
-            path, cfg.data
-        )
-        assert X_train.shape[0] == int(train_mask.sum()) == y_train.shape[0]
-        assert X_val.shape[0] == int(val_mask.sum()) == y_val.shape[0]
-        assert X_test.shape[0] == int(test_mask.sum()) == y_test.shape[0]
-        total = X_train.shape[0] + X_val.shape[0] + X_test.shape[0]
-        assert total == len(df)
+        X_splits, y_splits, _, _, _ = load_superset_features(cfg)
+        expected = [int(train_mask.sum()), int(val_mask.sum()), int(test_mask.sum())]
+        for X, y, n_rows in zip(X_splits, y_splits, expected, strict=True):
+            assert X.shape[0] == n_rows == y.shape[0]
 
     def test_excludes_identifier_and_target(self, feature_bundle):
         """Positive: X never contains timestamp or the target column."""
         path, _, _, cfg = feature_bundle
-        names = get_feature_names(path, cfg.data)
-        assert "timestamp" not in names
-        assert "price_eur_mwh" not in names
-        assert any(n.startswith("lag_") for n in names)
+        feature_cols = load_superset_features(cfg)[2]
+        assert "timestamp" not in feature_cols
+        assert "price_eur_mwh" not in feature_cols
+        assert any(n.startswith("lag_") for n in feature_cols)
 
     def test_schema_sidecar_drives_selection(self, feature_bundle):
         """Positive: with a sidecar, names come from role==FEATURE."""
         path, _, schema, cfg = feature_bundle
-        names = get_feature_names(path, cfg.data)
-        assert names == schema.feature_names()
+        feature_cols = resolve_selection(_schema_of(path), cfg.features.select)
+        assert feature_cols == schema.feature_names()
         # The sidecar's FEATURE role excludes the meta column...
-        assert "is_imputed" not in names
+        assert "is_imputed" not in feature_cols
 
-    def test_legacy_fallback_without_sidecar(self, feature_bundle, caplog):
-        """Negative: missing sidecar → legacy rule + a WARNING, no crash."""
+    def test_missing_sidecar_raises(self, feature_bundle):
+        """Negative: a superset without its sidecar is a hard error."""
         path, schema_path, _, cfg = feature_bundle
         schema_path.unlink()
-        with caplog.at_level(logging.WARNING, logger="src.training.loader"):
-            names = get_feature_names(path, cfg.data)
-        # Legacy rule: every column except timestamp and the target —
-        # including meta columns the sidecar would have excluded.
-        df = pd.read_parquet(path)
-        assert set(names) == set(df.columns) - {"timestamp", "price_eur_mwh"}
-        assert "is_imputed" in names
-        assert "No feature schema sidecar" in caplog.text
+        with pytest.raises(FileNotFoundError, match="schema sidecar"):
+            load_superset_features(cfg)
+
+    def test_missing_manifest_raises(self, feature_bundle):
+        """Negative: a superset without manifest.json is a hard error."""
+        from src.common.superset import superset_paths
+
+        _, _, _, cfg = feature_bundle
+        superset_paths(cfg).manifest.unlink()
+        with pytest.raises(FileNotFoundError, match="manifest"):
+            load_superset_features(cfg)
+
+    def test_missing_superset_raises_actionable_error(self, feature_bundle):
+        """Negative: no superset at all → error naming `make featurise`."""
+        import shutil
+
+        _, _, _, cfg = feature_bundle
+        shutil.rmtree(cfg.data.superset_dir)
+        with pytest.raises(FileNotFoundError, match="featurise"):
+            load_superset_features(cfg)
+
+    def test_selection_narrows_columns(self, feature_bundle):
+        """Positive: a group selection trains on a strict subset."""
+        import copy
+
+        _, _, _, cfg = feature_bundle
+        all_cols = load_superset_features(cfg)[2]
+
+        narrowed = copy.deepcopy(cfg)
+        narrowed.features.select = FeatureSelection(groups=["lags"])
+        subset_cols = load_superset_features(narrowed)[2]
+
+        assert 0 < len(subset_cols) < len(all_cols)
+        assert set(subset_cols) < set(all_cols)

@@ -136,7 +136,11 @@ def sample_config_stage2() -> PipelineConfig:
                     ],
                 },
                 "lags": {"enabled": True, "periods": [1, 2, 24]},
-                "derivatives": {"enabled": False, "order": [1, 2], "smooth_window": 3},
+                "derivatives": {
+                    "enabled": False,
+                    "order": [1, 2],
+                    "smooth_windows": [3],
+                },
             },
             "model": {
                 "type": "xgboost.XGBRegressor",
@@ -233,9 +237,54 @@ def raw_csv_path(tmp_path, sample_df: pd.DataFrame) -> str:
 
 
 @pytest.fixture
-def features_parquet_path(tmp_path, sample_df_with_features: pd.DataFrame) -> str:
-    """Write sample_df_with_features to a temp Parquet and return its path."""
-    path = tmp_path / "processed" / "features.parquet"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    sample_df_with_features.to_parquet(path, index=False)
-    return str(path)
+def superset_dir(
+    tmp_path, sample_df_with_features: pd.DataFrame, sample_config
+) -> str:
+    """Materialise a superset in a temp dir and point the config at it.
+
+    WS0 (scheme B): training and evaluation read the superset produced by
+    ``make featurise`` instead of a single ``features.parquet``. This fixture
+    reproduces that artifact for unit/integration tests — parquet, schema
+    sidecar and manifest — and repoints ``data.superset_dir`` so
+    ``loader.open_superset`` finds it without touching the project tree.
+
+    Args:
+        tmp_path: Pytest temp directory.
+        sample_df_with_features: Feature frame to materialise.
+        sample_config: Config whose ``superset_dir`` is redirected.
+
+    Returns:
+        The superset directory path.
+    """
+    from src.common.schema import schema_from_dataframe
+    from src.common.superset import (
+        build_manifest,
+        superset_paths,
+        write_manifest,
+    )
+
+    directory = tmp_path / "superset"
+    directory.mkdir(parents=True, exist_ok=True)
+    sample_config.data.superset_dir = str(directory) + "/"
+
+    paths = superset_paths(sample_config)
+    sample_df_with_features.to_parquet(paths.parquet, index=False)
+
+    # ``schema_from_dataframe`` declares the timestamp identifier, the target
+    # and every remaining column as an ``external`` feature — enough for
+    # selection tests, which care about roles, not the real group names.
+    schema = schema_from_dataframe(
+        sample_df_with_features, target_col=sample_config.data.target_col
+    )
+    schema.save(paths.schema)
+
+    write_manifest(paths, build_manifest(paths, sample_config, raw_csv_path=None))
+    return str(directory)
+
+
+@pytest.fixture
+def superset_path(superset_dir: str, sample_config) -> str:
+    """Path to the parquet inside the fixture-materialised superset."""
+    from src.common.superset import superset_paths
+
+    return str(superset_paths(sample_config).parquet)

@@ -18,7 +18,7 @@ from src.training.baselines import (
     train_baseline_persistence,
     train_baseline_seasonal_naive,
 )
-from src.training.loader import get_feature_names, load_features, load_model
+from src.training.loader import load_model, load_superset_features
 from src.training.registry import log_to_mlflow
 
 # Stable module logger name (not __name__ — `python -m` sets __name__ to
@@ -37,14 +37,12 @@ def main():
     # inherits the handlers and level; leaf-scope would leave them
     # unconfigured (effective WARNING, INFO logs silently dropped).
     setup_logging(cfg.logging, logger_name="src.training")
-    processed_path = cfg.data.processed_path
-
     logger.info("Stage: training")
-    logger.info("Loading features")
-    X_train, y_train, X_val, y_val, X_test, y_test = load_features(
-        processed_path, cfg.data
-    )
-    feature_names = get_feature_names(processed_path, cfg.data)
+    logger.info("Loading features from the superset")
+    loaded = load_superset_features(cfg)
+    X_splits, y_splits, feature_names, subset_schema, _ = loaded
+    X_train, y_train = X_splits[0], y_splits[0]
+    X_val, y_val = X_splits[1], y_splits[1]
 
     # --- Train XGBoost ---
     logger.info("Loading model: %s", cfg.model.type)
@@ -62,12 +60,15 @@ def main():
         logger.info("Validation %s: %.4f", name, value)
 
     logger.info("Logging XGBoost to MLflow")
-    # Primary model: promoted to the champion alias
+    # Primary model: promoted to the champion alias. The *subset* schema is
+    # logged so evaluation and serving read the model's own input contract
+    # (WS0 decision D-c) rather than re-deriving it from config.
     log_to_mlflow(
         model,
         metrics,
         cfg,
         feature_names=feature_names,
+        feature_schema=subset_schema,
         run_name="xgboost-v1",
         promote_to_production=True,
     )

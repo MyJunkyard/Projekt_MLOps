@@ -64,6 +64,7 @@ CalendarFeature = Literal[
     "is_workday",
     "days_to_next_holiday",
     "days_since_last_holiday",
+    "is_long_weekend",
 ]
 
 #: Open-Meteo hourly weather variables (Workstream 3).
@@ -78,15 +79,31 @@ WeatherVariable = Literal[
 #: ENTSO-E generation sources mapped to ``*_mw`` columns (Workstream 4).
 GenerationSource = Literal["wind", "solar", "coal", "gas", "nuclear", "hydro"]
 
+#: ENTSO-E neighbour areas for cross-border day-ahead flows (Workstream 2,
+#: EXP-006). Each zone ``Z`` yields a raw ``flow_{z.lower()}_mw`` column at
+#: ingest and ``flow_{z.lower()}_lag{L}h`` after availability alignment.
+CrossBorderZone = Literal["DE_LU", "CZ", "SK", "LT", "SE_4"]
+
 #: Raw external columns that may carry a real-time publication lag
 #: (Workstream 4): the actual load plus one ``{source}_mw`` column per
-#: generation source. ``features.availability_lags`` keys must come from
-#: this set so a typo fails at config load, not mid-run.
+#: generation source plus one ``flow_{zone}_mw`` column per cross-border
+#: neighbour. ``features.availability_lags`` keys must come from this set
+#: so a typo fails at config load, not mid-run.
 RAW_EXTERNAL_COLUMNS: frozenset[str] = frozenset(
-    ["load_mw", *[f"{source}_mw" for source in get_args(GenerationSource)]]
+    [
+        "load_mw",
+        *[f"{source}_mw" for source in get_args(GenerationSource)],
+        *[f"flow_{zone.lower()}_mw" for zone in get_args(CrossBorderZone)],
+    ]
 )
 
 TemporalResolution = Literal["hourly", "daily", "weekly"]
+
+#: Forecast-horizon training strategies (Workstream 1, EXP-014/015).
+#: ``single_step`` keeps the Stage-1..3 behaviour: fit ``X_t -> y_t`` and
+#: ``temporal.horizon`` is ignored for training; ``direct`` trains one
+#: model per horizon step; ``shared`` uses ``horizon_step`` as a feature.
+ForecastStrategy = Literal["single_step", "direct", "shared"]
 
 FillMethod = Literal["ffill", "interpolate"]
 
@@ -155,7 +172,7 @@ class DataConfig(_Strict):
     """``data`` — paths, columns, split boundaries, and imputation policy."""
 
     raw_path: str = "data/raw/"
-    processed_path: str = "data/processed/features.parquet"
+    superset_dir: str = "data/processed/superset/"
     reference_path: str = "data/reference/reference.parquet"
     target_col: str
     date_col: str = "timestamp"
@@ -180,10 +197,16 @@ class DataConfig(_Strict):
 
 
 class TemporalConfig(_Strict):
-    """``temporal`` — data resolution and forecast horizon."""
+    """``temporal`` — data resolution, forecast horizon, and strategy.
+
+    ``strategy`` (Workstream 1) selects how the horizon is trained. No
+    cross-field validator is needed: ``strategy != "single_step"``
+    requires ``horizon >= 1``, which ``PositiveInt`` already guarantees.
+    """
 
     resolution: TemporalResolution = "hourly"
     horizon: PositiveInt = 24
+    strategy: ForecastStrategy = "single_step"
 
     @property
     def pandas_freq(self) -> str:
@@ -204,7 +227,31 @@ class CalendarConfig(_Strict):
         "is_workday",
         "days_to_next_holiday",
         "days_since_last_holiday",
+        "is_long_weekend",
     ]
+
+
+class WeatherDerivativesConfig(_Strict):
+    """``features.weather.derivatives`` — smoothed weather derivatives (WS3).
+
+    One derivative per configured ``variables`` entry, per ``order``,
+    after smoothing with a ``smooth_window`` rolling mean (the same
+    smooth-then-differencing recipe as ``features.derivatives`` for the
+    target). ``variables`` must be a subset of ``features.weather.variables``
+    — validated on ``WeatherConfig`` when the block is enabled, because a
+    derivative cannot exist without its base column.
+    """
+
+    enabled: bool = False
+    variables: list[WeatherVariable] = ["wind_speed_100m"]
+    order: list[PositiveInt] = [1]
+    smooth_windows: list[PositiveInt] = [3]
+
+    @field_validator("smooth_windows")
+    @classmethod
+    def _unique_sorted(cls, v: list[int]) -> list[int]:
+        """Dedupe and sort: windows are a set, order carries no meaning."""
+        return sorted(set(v))
 
 
 class WeatherConfig(_Strict):
@@ -226,6 +273,7 @@ class WeatherConfig(_Strict):
     ]
     locations: list[str] = ["warsaw"]
     allow_synthetic: bool = False
+    derivatives: WeatherDerivativesConfig = WeatherDerivativesConfig()
 
     @field_validator("locations")
     @classmethod
@@ -242,6 +290,24 @@ class WeatherConfig(_Strict):
         if len(set(v)) != len(v):
             raise ValueError("features.weather.locations contains duplicates")
         return v
+
+    @model_validator(mode="after")
+    def _derivatives_subset_of_variables(self) -> "WeatherConfig":
+        """Derivative variables must exist among the weather variables.
+
+        Checked only while the block is enabled: with ``derivatives.enabled:
+        false`` the list is inert, so a narrowed ``weather.variables`` must
+        not fail at load for an unused block.
+        """
+        if self.derivatives.enabled:
+            unknown = sorted(set(self.derivatives.variables) - set(self.variables))
+            if unknown:
+                raise ValueError(
+                    f"features.weather.derivatives.variables {unknown} not in "
+                    f"features.weather.variables {sorted(self.variables)} — "
+                    "a derivative cannot exist without its base column"
+                )
+        return self
 
 
 class LagsConfig(_Strict):
@@ -270,7 +336,13 @@ class DerivativesConfig(_Strict):
 
     enabled: bool = False
     order: list[PositiveInt] = [1, 2]
-    smooth_window: PositiveInt = 3
+    smooth_windows: list[PositiveInt] = [3, 6, 12]
+
+    @field_validator("smooth_windows")
+    @classmethod
+    def _unique_sorted(cls, v: list[int]) -> list[int]:
+        """Dedupe and sort: windows are a set, order carries no meaning."""
+        return sorted(set(v))
 
 
 class GenerationMixConfig(_Strict):
@@ -301,9 +373,52 @@ class GenerationMixConfig(_Strict):
 
 
 class CrossBorderFlowsConfig(_Strict):
-    """``features.cross_border_flows`` — placeholder (Stage 4+)."""
+    """``features.cross_border_flows`` — ENTSO-E cross-border flows (WS2, EXP-006).
+
+    ``neighbours`` are ENTSO-E Area codes: each ``Z`` yields a raw
+    ``flow_{z.lower()}_mw`` column at ingest (WS2 download) and, once
+    listed in ``features.availability_lags``, a deployment-consistent
+    ``flow_{z.lower()}_lag{L}h`` feature.
+    """
 
     enabled: bool = False
+    neighbours: list[CrossBorderZone] = ["DE_LU", "CZ", "SK", "LT", "SE_4"]
+
+    @field_validator("neighbours")
+    @classmethod
+    def _unique_sorted(cls, v: list[str]) -> list[str]:
+        """Dedupe and sort: duplicate zones would rebuild the same column."""
+        return sorted(set(v))
+
+
+class FeatureSelection(_Strict):
+    """``features.select`` — the column subset THIS run trains on (WS0).
+
+    Read by training/evaluation only; it never triggers ingest or
+    featurise. The default ``features.select: null`` means "all feature
+    columns in the materialised superset" (today's behaviour). Schema
+    existence of a group/column is checked at train time against the
+    superset sidecar (``training/loader.py``), not here — the superset
+    may not exist at config-load time.
+    """
+
+    groups: list[str] = []
+    columns: list[str] = []
+
+    @model_validator(mode="after")
+    def _at_least_one_non_empty(self) -> "FeatureSelection":
+        """An explicit selection must pick something, with no blank names."""
+        blank = [name for name in (*self.groups, *self.columns) if not name.strip()]
+        if blank:
+            raise ValueError(
+                f"features.select entries must be non-empty strings, got {blank!r}"
+            )
+        if not self.groups and not self.columns:
+            raise ValueError(
+                "features.select must list at least one group or column "
+                "(omit features.select — null — to train on all columns)"
+            )
+        return self
 
 
 class FeaturesConfig(_Strict):
@@ -326,6 +441,7 @@ class FeaturesConfig(_Strict):
     generation_mix: GenerationMixConfig = GenerationMixConfig()
     cross_border_flows: CrossBorderFlowsConfig = CrossBorderFlowsConfig()
     availability_lags: dict[str, PositiveInt] = {}
+    select: FeatureSelection | None = None
 
     @field_validator("availability_lags")
     @classmethod
@@ -344,9 +460,9 @@ class FeaturesConfig(_Strict):
 
     @model_validator(mode="after")
     def _generation_sources_covered(self) -> "FeaturesConfig":
-        """Generation sources enabled for features must have a lag entry.
+        """Enabled externals must have an ``availability_lags`` entry.
 
-        A ``{source}_mw`` column without an ``availability_lags`` entry
+        A ``{source}_mw`` or ``flow_{zone}_mw`` column without a lag entry
         would flow into the feature matrix as a current-hour value —
         exactly the deployment leakage this mechanism prevents — so the
         omission fails at load time.
@@ -362,6 +478,19 @@ class FeaturesConfig(_Strict):
                     f"features.generation_mix is enabled but "
                     f"features.availability_lags has no entry for "
                     f"{missing} — every generation source must declare "
+                    "its real-time publication lag (>= 1 hour)."
+                )
+        if self.cross_border_flows.enabled:
+            missing_flows = sorted(
+                f"flow_{zone.lower()}_mw"
+                for zone in self.cross_border_flows.neighbours
+                if f"flow_{zone.lower()}_mw" not in self.availability_lags
+            )
+            if missing_flows:
+                raise ValueError(
+                    f"features.cross_border_flows is enabled but "
+                    f"features.availability_lags has no entry for "
+                    f"{missing_flows} — every cross-border flow must declare "
                     "its real-time publication lag (>= 1 hour)."
                 )
         return self
@@ -395,6 +524,23 @@ class EvaluationConfig(_Strict):
     metrics: list[SupportedMetric] = ["rmse", "mae", "mape", "r2"]
     generate_plots: bool = True
     residual_breakdown: list[str] = ["hour", "day_of_week", "month", "is_holiday"]
+    # WS4 residual-analysis controls (inert until src/evaluation/analysis.py).
+    residual_quantiles: int = 5
+    sample_week: date | None = None
+    run_analysis_after_train: bool = True
+    # WS7 metric plumbing (consumed from step 5 on).
+    naive_period: PositiveInt = 168
+    dm_test: bool = True
+
+    @field_validator("residual_quantiles")
+    @classmethod
+    def _quantiles_non_negative(cls, v: int) -> int:
+        """``0`` disables price-quantile breakdowns; negatives are nonsense."""
+        if v < 0:
+            raise ValueError(
+                f"evaluation.residual_quantiles must be >= 0 (0 disables), got {v}"
+            )
+        return v
 
     @model_validator(mode="after")
     def _primary_in_metrics(self) -> "EvaluationConfig":

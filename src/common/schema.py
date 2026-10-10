@@ -177,6 +177,42 @@ class FeatureSchema(BaseModel):
         path_obj = Path(path)
         return cls.model_validate_json(path_obj.read_text(encoding="utf-8"))
 
+    def subset(self, names: list[str]) -> "FeatureSchema":
+        """Filter the schema to ``names``, in canonical (this schema's) order.
+
+        The subset schema describes a resolved experiment selection: it is
+        what training logs to MLflow and what serving/evaluate resolve
+        against, so a model instance is pinned to the exact columns it was
+        fitted on.
+
+        Ordering follows the superset schema, not the ``names`` argument:
+        ``params.yaml`` lists selections in an arbitrary order, and a
+        run's schema must be reproducible regardless of how the selection
+        was written.
+
+        Args:
+            names: Column names to keep (may include non-FEATURE roles).
+
+        Returns:
+            A new :class:`FeatureSchema` covering exactly ``names``, in
+            canonical column order.
+
+        Raises:
+            ValueError: If any name is not in the schema.
+        """
+        requested = set(names)
+        unknown = requested - set(self.columns)
+        if unknown:
+            raise ValueError(
+                f"unknown column(s) {sorted(unknown)} not in schema "
+                f"(available: {sorted(self.columns)})"
+            )
+        return FeatureSchema(
+            columns={
+                name: spec for name, spec in self.columns.items() if name in requested
+            }
+        )
+
     def to_json(self) -> str:
         """Serialize to a JSON string (``model_dump_json`` alias)."""
         return self.model_dump_json(indent=2)

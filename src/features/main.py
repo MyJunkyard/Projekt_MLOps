@@ -3,8 +3,21 @@ features/main.py — Featurisation orchestration.
 
 Orchestrates: load raw → calendar/holiday features → availability
 alignment → weather merge → lag/rolling features → derivative features
-→ split → save. The only place in the features package that knows the
-run order.
+→ materialise superset → split → save reference. The only place in the
+features package that knows the run order.
+
+WS0 output (scheme B): featurise writes **one feature superset** into
+``data.superset_dir`` — ``features_{resolution}.parquet`` plus its
+``FeatureSchema`` sidecar and ``manifest.json`` — covering every enabled
+feature block with warm-up NaNs retained. Training and evaluation read that
+superset and apply their own ``features.select`` subset; neither stage
+imports this package. ``data.reference_path`` keeps the NaN-free train split
+for Stage-5 drift detection.
+
+The ``enabled`` flags therefore mean "what the superset contains", not "what
+this run uses": experimenting is a ``features.select`` edit plus
+``make train``, and ``make featurise`` is only re-run when a feature block
+itself changes.
 
 Workstream 4 additions:
 
@@ -14,13 +27,12 @@ Workstream 4 additions:
   prediction time. Actual load and generation are published with a
   ~1h real-time lag; merging the raw current-hour value would leak
   information that does not exist at serving time. The raw columns
-  never reach ``features.parquet``.
+  never reach the superset.
 - **Column metadata registry**: each block runner declares the columns
   it produced as ``ColumnSpec`` records (``src/common/schema.py``);
   ``build_features`` returns ``(df, FeatureSchema)`` and ``main()``
-  saves ``features_schema.json`` next to ``features.parquet``.
-  Downstream consumers query the schema instead of parsing name
-  patterns.
+  saves the sidecar next to the superset parquet. Downstream consumers
+  query the schema instead of parsing name patterns.
 
 Structure: ``build_features`` keeps the explicit ``if enabled`` dispatch
 in run order (order is load-bearing for the no-leakage guarantee — kept
@@ -42,8 +54,18 @@ import pandas as pd
 from src.common.logsetup import setup_logging
 from src.common.schema import ColumnRole, ColumnSpec, FeatureSchema
 from src.common.splits import get_split_masks
+from src.common.superset import (
+    SupersetPaths,
+    build_manifest,
+    superset_paths,
+    write_manifest,
+)
 from src.config import load_config
-from src.config.models import DataConfig, FeaturesConfig
+from src.config.models import (
+    DataConfig,
+    FeaturesConfig,
+    PipelineConfig,
+)
 from src.features.calendar import (
     _get_holiday_dates,
     add_calendar_features,
@@ -237,36 +259,65 @@ def train_val_test_split(
     return train, val, test
 
 
-def save_processed_data(
-    train: pd.DataFrame,
-    val: pd.DataFrame,
-    test: pd.DataFrame,
-    processed_path: str,
-    reference_path: str,
-) -> None:
-    """Save concatenated features and reference dataset.
+def materialize_superset(
+    df: pd.DataFrame,
+    schema: FeatureSchema,
+    cfg: PipelineConfig,
+    config_path: str = "params.yaml",
+) -> SupersetPaths:
+    """Write the feature superset: parquet + schema sidecar + manifest.
+
+    The single artifact training and evaluation read. The frame is written
+    exactly as produced by :func:`build_features` (warm-up NaNs retained) —
+    this function performs no filtering, so the superset stays a faithful
+    superset of every enabled feature block.
 
     Args:
-        train: Training split DataFrame (must share the same columns as
-            ``val`` and ``test``).
-        val: Validation split DataFrame.
-        test: Test split DataFrame.
-        processed_path: Path to save the concatenated features Parquet.
-        reference_path: Path to save the train split as reference data.
-    """
-    processed_path_obj = Path(processed_path)
-    processed_path_obj.parent.mkdir(parents=True, exist_ok=True)
+        df: The featurised frame (identifier + target + all features).
+        schema: ``FeatureSchema`` pinned to ``df`` columns.
+        cfg: Loaded pipeline configuration (paths, hashes, resolution).
+        config_path: ``params.yaml`` location for the provenance hash.
 
-    # Concatenate all splits
-    full = pd.concat([train, val, test], axis=0)
-    full.to_parquet(processed_path_obj, index=False)
+    Returns:
+        The :class:`SupersetPaths` written to disk.
+
+    Raises:
+        ValueError: If the frame is empty (nothing worth materialising).
+        AssertionError: If the schema and frame disagree on columns.
+    """
+    if df.empty:
+        raise ValueError(
+            "Refusing to materialise an empty superset: build_features "
+            "produced no rows. Check the raw data and temporal.resolution."
+        )
+    schema.assert_matches_dataframe(df)
+
+    paths = superset_paths(cfg)
+    paths.ensure_dir()
+    df.to_parquet(paths.parquet, index=False)
+    schema.save(paths.schema)
     logger.info(
-        "Saved features: %s (%s rows)",
-        processed_path_obj,
-        f"{len(full):,}",
+        "Saved superset: %s (%s rows x %s columns)",
+        paths.parquet,
+        f"{len(df):,}",
+        df.shape[1],
     )
 
-    # Save train split as reference for drift detection
+    raw_csv = Path(cfg.data.raw_path) / "entsoe_prices.csv"
+    manifest = build_manifest(
+        paths, cfg, config_path=config_path, raw_csv_path=raw_csv
+    )
+    write_manifest(paths, manifest)
+    return paths
+
+
+def save_reference_data(train: pd.DataFrame, reference_path: str) -> None:
+    """Save the train split as the reference dataset for drift detection.
+
+    Args:
+        train: Training split DataFrame (NaN-free, all superset columns).
+        reference_path: Path to write the reference Parquet.
+    """
     reference_path_obj = Path(reference_path)
     reference_path_obj.parent.mkdir(parents=True, exist_ok=True)
     train.to_parquet(reference_path_obj, index=False)
@@ -457,14 +508,18 @@ def _run_derivatives(
     target_col: str,
     declared: dict[str, ColumnSpec],
 ) -> pd.DataFrame:
-    """Derivative block (group ``derivative``)."""
+    """Derivative block (group ``derivative``).
+
+    One column per ``(order, window)`` pair, named ``{target}_diff_{n}_w{w}``;
+    the run book picks the variant via ``features.select`` (EXP-008/009).
+    """
     order = features.derivatives.order
-    smooth_window = features.derivatives.smooth_window
+    smooth_windows = features.derivatives.smooth_windows
     df = _apply_step(
         df,
-        f"derivative features (order={order}, smooth_window={smooth_window})",
+        f"derivative features (order={order}, smooth_windows={smooth_windows})",
         lambda d: add_derivative_features(
-            d, target_col, order=order, smooth_window=smooth_window
+            d, target_col, order=order, smooth_windows=smooth_windows
         ),
     )
     _declare_new_columns(df, declared, "derivative", "smoothed target derivative")
@@ -513,13 +568,13 @@ def build_features(
     features: FeaturesConfig,
     target_col: str,
     weather: dict[str, pd.DataFrame] | None = None,
+    drop_na: bool = True,
 ) -> tuple[pd.DataFrame, FeatureSchema]:
     """Apply all enabled feature groups to the full frame (pre-split).
 
-    Pure transformation (no I/O): sorts by ``timestamp``, applies each
-    enabled feature group in run order, and drops rows left as NaN by
-    lag/derivative creation at the series start. The caller splits the
-    returned frame into train/val/test.
+    Pure transformation (no I/O): sorts by ``timestamp`` and applies each
+    enabled feature group in run order. The caller splits the returned frame
+    into train/val/test.
 
     Run order (load-bearing for the no-leakage guarantee — kept visible,
     no registry):
@@ -538,6 +593,13 @@ def build_features(
     :class:`FeatureSchema` is the metadata counterpart of the frame
     (pinned equal to ``df.columns`` before return — drift fails fast).
 
+    NaN policy is the caller's choice (``drop_na``). The default
+    ``drop_na=True`` reproduces the historical Stage-3 behaviour and is what
+    the reference/drift path wants. The WS0 superset path passes
+    ``drop_na=False`` and keeps warm-up NaNs on purpose: which rows are
+    usable depends on the *selected* features, and that is only known at
+    train time (see ``training.loader.drop_selected_nan_rows``).
+
     Args:
         df: Raw DataFrame with ``timestamp`` and ``target_col`` columns.
         features: ``FeaturesConfig`` with the per-group toggles/settings.
@@ -547,18 +609,22 @@ def build_features(
             float variable columns), keyed by location name. Required
             when ``features.weather.enabled`` is true; the caller loads
             them from the cache (never the network — decision D2).
+        drop_na: Drop rows left NaN by lag/derivative creation at the
+            series start. ``True`` (default) returns a NaN-free frame;
+            ``False`` retains those rows for superset materialisation.
 
     Returns:
-        A ``(df, schema)`` tuple: the featurised DataFrame with no NaN
-        rows, and the :class:`FeatureSchema` describing its columns.
+        A ``(df, schema)`` tuple: the featurised DataFrame (NaN-free when
+        ``drop_na`` is true) and the :class:`FeatureSchema` describing its
+        columns.
 
     Raises:
         ValueError: If ``features.weather.enabled`` is true but no
             weather data was supplied, if a configured location is
             missing from ``weather``, if the schema and the frame
-            disagree on columns, or if every row is dropped as NaN
-            (e.g. the longest configured lag period exceeds the
-            available history).
+            disagree on columns, or — only when ``drop_na`` is true — if
+            every row is dropped as NaN (e.g. the longest configured lag
+            period exceeds the available history).
     """
     # Sort by timestamp to ensure correct lag computation
     df = df.sort_values("timestamp").reset_index(drop=True)
@@ -585,7 +651,18 @@ def build_features(
     if features.derivatives.enabled:
         df = _run_derivatives(df, features, target_col, declared)
 
-    df = _drop_nan_rows(df, features)
+    # NaN policy is the caller's decision. The superset path keeps warm-up
+    # NaNs (drop_na=False) so the usable row set can be decided later, per
+    # selection; everything else wants the historical NaN-free frame.
+    if drop_na:
+        df = _drop_nan_rows(df, features)
+    elif df.isna().any().any():
+        nan_cols = [c for c in df.columns if df[c].isna().any()]
+        logger.info(
+            "Keeping %d rows with NaN (superset materialisation); columns: %s",
+            int(df.isna().any(axis=1).sum()),
+            nan_cols,
+        )
 
     schema = FeatureSchema(columns=declared)
     # Drift guard: the declared schema must cover exactly the frame
@@ -596,7 +673,7 @@ def build_features(
 
 
 def main() -> None:
-    """Orchestrate feature engineering pipeline."""
+    """Orchestrate the feature engineering pipeline (WS0: superset output)."""
     cfg = load_config()
     # Configure the *package* logger by explicit name (never `__name__` —
     # under `python -m` that resolves to "__main__" and would bypass the
@@ -606,9 +683,7 @@ def main() -> None:
     # unconfigured (effective WARNING, INFO logs silently dropped).
     setup_logging(cfg.logging, logger_name="src.features")
     raw_path = Path(cfg.data.raw_path) / "entsoe_prices.csv"
-    processed_path = cfg.data.processed_path
     reference_path = cfg.data.reference_path
-    schema_path = Path(processed_path).with_name("features_schema.json")
 
     logger.info("Stage: featurisation")
     logger.info("Loading raw data")
@@ -639,20 +714,34 @@ def main() -> None:
     else:
         logger.debug("Weather features disabled — no weather merge")
 
-    logger.info("Engineering features")
+    logger.info("Engineering features (superset: all enabled blocks, NaNs kept)")
     df, schema = build_features(
-        df, cfg.features, cfg.data.target_col, weather=weather
+        df, cfg.features, cfg.data.target_col, weather=weather, drop_na=False
     )
 
-    logger.debug("Feature columns after engineering: %s", list(df.columns))
+    logger.debug("Superset columns after engineering: %s", list(df.columns))
+    superset = materialize_superset(df, schema, cfg)
+    logger.info(
+        "Superset ready: %s (%s rows, %s columns) — training/evaluation apply "
+        "features.select against it",
+        superset.parquet,
+        f"{len(df):,}",
+        df.shape[1],
+    )
+
+    # The reference dataset is the only artifact that still needs a single
+    # canonical row set: Stage-5 drift compares against the train split. It
+    # uses the union-dropna policy (drop rows NaN in ANY column) and is
+    # deliberately select-agnostic — see the WS0 plan, decision D-c.
+    logger.info("Building reference dataset (union-dropna train split)")
+    df_clean = _drop_nan_rows(df, cfg.features)
+
     logger.info("Splitting into train/val/test")
-    train, val, test = train_val_test_split(df, cfg.data)
+    train, _, _ = train_val_test_split(df_clean, cfg.data)
 
-    logger.info("Saving processed data")
-    save_processed_data(train, val, test, processed_path, reference_path)
-    schema.save(schema_path)
+    logger.info("Saving reference data")
+    save_reference_data(train, reference_path)
     logger.info("Featurisation complete")
-
 
 if __name__ == "__main__":
     main()

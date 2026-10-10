@@ -15,7 +15,6 @@ import matplotlib
 matplotlib.use("Agg")  # headless backend (no display needed)
 
 import numpy as np
-import pandas as pd
 
 from src.common.logsetup import setup_logging
 from src.common.metrics import compute_metrics
@@ -27,7 +26,9 @@ from src.evaluation.reporting import (
     load_test_features,
     log_evaluation_results,
     log_results_table,
+    resolve_evaluate_columns,
 )
+from src.training.loader import drop_selected_nan_rows, open_superset
 
 # Stable module name (not `__name__` — under `python -m` it is
 # `"__main__"` and would bypass the configured src logger).
@@ -45,17 +46,25 @@ def main() -> None:
     # handlers and level; leaf-scope would leave them unconfigured
     # (effective WARNING, INFO logs silently dropped).
     setup_logging(cfg.logging, logger_name="src.evaluation")
-    processed_path = cfg.data.processed_path
     reports_dir = Path("reports")
 
     logger.info("Stage: evaluation")
-    logger.info("Loading test features")
-    df = pd.read_parquet(processed_path)
-    X_test, y_test = load_test_features(processed_path, cfg.data)
+    logger.info("Opening feature superset")
+    df, schema = open_superset(cfg)
 
-    # Get test DataFrame columns for residual breakdown
-    _, _, test_mask = get_split_masks(df, cfg.data)
-    df_test = df.iloc[test_mask].reset_index(drop=True)
+    logger.info("Resolving the champion model's feature columns")
+    feature_cols, _ = resolve_evaluate_columns(cfg, schema)
+
+    # One frame, one NaN policy. The superset keeps warm-up NaNs, so rows are
+    # dropped only where the *resolved selection* (or the target) is NaN.
+    # Everything below is derived from this single filtered frame, so
+    # y_test/y_pred and df_test stay row-aligned for the residual breakdowns.
+    logger.info("Building the test frame")
+    df_clean = drop_selected_nan_rows(df, feature_cols, cfg.data.target_col)
+    _, _, test_mask = get_split_masks(df_clean, cfg.data)
+    df_test = df_clean[test_mask].reset_index(drop=True)
+
+    X_test, y_test = load_test_features(df_test, feature_cols, cfg.data.target_col)
 
     logger.info("Loading model from registry")
     model = load_model_from_registry(cfg)

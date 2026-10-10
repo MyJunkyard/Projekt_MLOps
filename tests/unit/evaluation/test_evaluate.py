@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.common.schema import FeatureSchema
 from src.config.models import EvaluationConfig
 from src.evaluation.plots import plot_actual_vs_predicted, residual_breakdown
 from src.evaluation.reporting import (
@@ -17,53 +18,92 @@ from src.evaluation.reporting import (
     load_test_features,
     log_evaluation_results,
     log_results_table,
+    resolve_evaluate_columns,
+)
+from src.training.loader import (
+    drop_selected_nan_rows,
+    load_superset_features,
+    open_superset,
 )
 
 
 class TestLoadTestFeatures:
-    def test_returns_x_and_y(self, features_parquet_path, sample_config):
+    @mock.patch("src.evaluation.reporting.get_model_run_id", return_value=None)
+    def test_returns_x_and_y(self, mock_run_id, superset_dir, sample_config):
         """Positive: returns X_test and y_test arrays."""
-        X_test, y_test = load_test_features(features_parquet_path, sample_config.data)
+        frame, schema = open_superset(sample_config)
+        feature_cols, _ = resolve_evaluate_columns(sample_config, schema)
+        X_test, y_test = load_test_features(
+            frame, feature_cols, sample_config.data.target_col
+        )
         assert X_test.shape[0] == y_test.shape[0]
         assert X_test.shape[0] > 0
+        assert X_test.shape[1] == len(feature_cols)
 
     def test_missing_file_raises(self, tmp_path, sample_config):
-        """Negative: missing parquet raises FileNotFoundError."""
-        with pytest.raises(FileNotFoundError):
-            load_test_features(str(tmp_path / "nope.parquet"), sample_config.data)
-
-    def test_excludes_meta_columns_via_sidecar(
-        self, features_parquet_path, sample_config, tmp_path
-    ):
-        """Sidecar drives selection: meta columns (is_imputed) excluded.
-
-        Regression: the legacy "all non-timestamp, non-target" rule kept
-        ``is_imputed`` in X_test (n features + 1), which made the
-        sidecar-trained model raise "Feature shape mismatch" at predict
-        time. Evaluation must resolve columns exactly like training.
-        """
-        from src.common.schema import schema_from_dataframe
-        from src.training.loader import get_feature_names, load_features
-
-        # Rebuild the parquet with a meta column + schema sidecar, mimicking
-        # the real featurise output (features.parquet + features_schema.json).
-        df = pd.read_parquet(features_parquet_path)
-        df["is_imputed"] = False
-        out_path = tmp_path / "with_sidecar" / "features.parquet"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(out_path, index=False)
-        schema = schema_from_dataframe(df, target_col=sample_config.data.target_col)
-        schema.save(out_path.with_name("features_schema.json"))
-
-        X_test, _ = load_test_features(str(out_path), sample_config.data)
-        names = get_feature_names(str(out_path), sample_config.data)
-        assert X_test.shape[1] == len(names)
-        assert "is_imputed" not in names
-        # Identical matrix to what training would feed the model.
-        _, _, _, _, X_test_train, _ = load_features(
-            str(out_path), sample_config.data
+        """Negative: a frame without all resolved features raises ValueError."""
+        frame = pd.DataFrame(
+            {
+                "timestamp": pd.date_range(
+                    "2024-01-01", periods=10, freq="h", tz="UTC"
+                ),
+                "price_eur_mwh": np.linspace(40, 60, 10),
+            }
         )
-        np.testing.assert_array_equal(X_test, X_test_train)
+        with pytest.raises(ValueError, match="missing"):
+            load_test_features(
+                frame,
+                [
+                    "timestamp",
+                    "price_eur_mwh",
+                    "no_such_feature",
+                ],
+                sample_config.data.target_col,
+            )
+
+    @mock.patch("src.evaluation.reporting.get_model_run_id", return_value=None)
+    def test_excludes_meta_columns_via_sidecar(
+        self, mock_run_id, superset_dir, sample_config, tmp_path
+    ):
+        """Sidecar-driven selection excludes META columns (is_imputed)."""
+        from src.common.schema import schema_from_dataframe
+
+        frame, schema = open_superset(sample_config)
+        feature_cols, _ = resolve_evaluate_columns(sample_config, schema)
+        df_clean = drop_selected_nan_rows(
+            frame, feature_cols, sample_config.data.target_col
+        )
+
+        # The real featurise schema marks known meta columns as META:
+        # they are excluded from ``feature_names()`` and never reach X.
+        df_meta = df_clean.copy()
+        df_meta["is_imputed"] = False
+        meta_schema = schema_from_dataframe(
+            df_meta,
+            target_col=sample_config.data.target_col,
+            meta_cols=("is_imputed",),
+        )
+        sidecar_dir = tmp_path / "with_sidecar"
+        sidecar_dir.mkdir()
+        meta_schema.save(sidecar_dir / "features_schema.json")
+        loaded_meta_schema = FeatureSchema.from_file(
+            sidecar_dir / "features_schema.json"
+        )
+
+        meta_feature_cols, _ = resolve_evaluate_columns(
+            sample_config, loaded_meta_schema
+        )
+        X_test, y_test = load_test_features(
+            df_meta, meta_feature_cols, sample_config.data.target_col
+        )
+        assert "is_imputed" not in meta_feature_cols
+        assert "is_imputed" not in loaded_meta_schema.feature_names()
+        assert X_test.shape[1] == len(meta_feature_cols)
+        # Identical matrix to what training would feed the model: same
+        # clean frame, same canonical column order (the splits are
+        # row-slices of it in chronological order).
+        X_splits, _, _, _, _ = load_superset_features(sample_config)
+        np.testing.assert_array_equal(X_test, np.concatenate(X_splits))
 
 
 class TestLogResultsTable:
@@ -172,8 +212,8 @@ class TestGetModelRunId:
     @mock.patch("src.evaluation.reporting.mlflow")
     def test_returns_none_on_registry_error(self, mock_mlflow, sample_config):
         """Negative: registry failure returns None instead of raising."""
-        mock_mlflow.MlflowClient.return_value.get_model_version_by_alias.\
-            side_effect = RuntimeError("registry down")
+        client = mock_mlflow.MlflowClient.return_value
+        client.get_model_version_by_alias.side_effect = RuntimeError("registry down")
 
         assert get_model_run_id(sample_config) is None
 

@@ -19,6 +19,7 @@ from src.config.models import (
     EntsoeConfig,
     EvaluationConfig,
     FeaturesConfig,
+    FeatureSelection,
     GenerationMixConfig,
     LagsConfig,
     LoggingConfig,
@@ -28,6 +29,7 @@ from src.config.models import (
     ServingConfig,
     TemporalConfig,
     WeatherConfig,
+    WeatherDerivativesConfig,
 )
 
 __all__ = [
@@ -37,6 +39,7 @@ __all__ = [
     "DerivativesConfig",
     "EntsoeConfig",
     "EvaluationConfig",
+    "FeatureSelection",
     "FeaturesConfig",
     "GenerationMixConfig",
     "LagsConfig",
@@ -47,5 +50,6 @@ __all__ = [
     "ServingConfig",
     "TemporalConfig",
     "WeatherConfig",
+    "WeatherDerivativesConfig",
     "load_config",
 ]

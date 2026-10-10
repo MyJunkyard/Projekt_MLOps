@@ -35,6 +35,12 @@ def load_feature_schema(
 ) -> FeatureSchema | None:
     """Load the feature schema attached to a training run.
 
+    Reads the same ``config/features_schema.json`` artifact that
+    ``training/registry.py`` writes (WS0: the run's *resolved subset* schema —
+    the model's exact input contract, plan decision D-c). Kept independent of
+    the registry module so serving does not import the training package; the
+    artifact name is the contract, not the code path.
+
     Args:
         run_id: MLflow run that produced the registered model version.
         artifact_root: Optional local directory containing
