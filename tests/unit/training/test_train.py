@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 from src.common.hashing import compute_params_hash
+from src.common.selection import open_superset, resolve_selection
 from src.config.models import ModelConfig
 from src.training.baselines import (
     PersistenceModel,
@@ -23,8 +24,6 @@ from src.training.loader import (
     get_git_commit_hash,
     load_model,
     load_superset_features,
-    open_superset,
-    resolve_selection,
 )
 from src.training.registry import log_feature_importances, log_to_mlflow
 

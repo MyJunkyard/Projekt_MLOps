@@ -46,7 +46,7 @@ def main():
 
     # Per-split row counts (WS6 D6): logged on every run so a silent row-set
     # shift is visible in the compare table. len() counts rows *after* the
-    # warm-up/NaN policy (drop_selected_nan_rows inside the loader) — the
+    # warm-up/NaN policy (drop_selected_nan_rows in common.selection) — the
     # number the model actually saw, the only one worth comparing.
     row_counts = {
         name: int(len(split))

@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from src.common.schema import FeatureSchema
+from src.common.selection import drop_selected_nan_rows, open_superset
 from src.config.models import EvaluationConfig
 from src.evaluation.plots import plot_actual_vs_predicted, residual_breakdown
 from src.evaluation.reporting import (
@@ -20,11 +21,7 @@ from src.evaluation.reporting import (
     log_results_table,
     resolve_evaluate_columns,
 )
-from src.training.loader import (
-    drop_selected_nan_rows,
-    load_superset_features,
-    open_superset,
-)
+from src.training.loader import load_superset_features
 
 
 class TestLoadTestFeatures:

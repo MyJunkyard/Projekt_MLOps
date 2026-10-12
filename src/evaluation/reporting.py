@@ -11,10 +11,10 @@ import numpy as np
 import pandas as pd
 
 from src.common.schema import FeatureSchema
+from src.common.schema_artifact import read_feature_schema
+from src.common.selection import resolve_selection
 from src.common.superset import selection_summary
 from src.config.models import PipelineConfig
-from src.training.loader import resolve_selection
-from src.training.registry import read_feature_schema
 
 MODULE_LOGGER_NAME = "src.evaluation.reporting"
 logger = logging.getLogger(MODULE_LOGGER_NAME)

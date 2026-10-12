@@ -18,6 +18,7 @@ import numpy as np
 
 from src.common.logsetup import setup_logging
 from src.common.metrics import compute_metrics
+from src.common.selection import drop_selected_nan_rows, open_superset
 from src.common.splits import get_split_masks
 from src.config import load_config
 from src.evaluation.plots import plot_actual_vs_predicted, residual_breakdown
@@ -29,7 +30,6 @@ from src.evaluation.reporting import (
     log_results_table,
     resolve_evaluate_columns,
 )
-from src.training.loader import drop_selected_nan_rows, open_superset
 
 # Stable module name (not `__name__` — under `python -m` it is
 # `"__main__"` and would bypass the configured src logger).

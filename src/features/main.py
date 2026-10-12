@@ -598,7 +598,7 @@ def build_features(
     the reference/drift path wants. The WS0 superset path passes
     ``drop_na=False`` and keeps warm-up NaNs on purpose: which rows are
     usable depends on the *selected* features, and that is only known at
-    train time (see ``training.loader.drop_selected_nan_rows``).
+    train time (see ``common.selection.drop_selected_nan_rows``).
 
     Args:
         df: Raw DataFrame with ``timestamp`` and ``target_col`` columns.

@@ -9,6 +9,7 @@ from unittest import mock
 
 import numpy as np
 
+from src.common.selection import drop_selected_nan_rows, open_superset
 from src.common.splits import get_split_masks
 from src.config.models import FeatureSelection
 from src.evaluation.reporting import (
@@ -20,10 +21,8 @@ from src.training.baselines import (
     train_baseline_seasonal_naive,
 )
 from src.training.loader import (
-    drop_selected_nan_rows,
     load_model,
     load_superset_features,
-    open_superset,
 )
 
 #: The fixture superset (``superset_dir``) keeps the warm-up NaNs of

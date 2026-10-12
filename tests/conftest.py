@@ -246,7 +246,7 @@ def superset_dir(
     ``make featurise`` instead of a single ``features.parquet``. This fixture
     reproduces that artifact for unit/integration tests — parquet, schema
     sidecar and manifest — and repoints ``data.superset_dir`` so
-    ``loader.open_superset`` finds it without touching the project tree.
+    ``common.selection.open_superset`` finds it without touching the project tree.
 
     Args:
         tmp_path: Pytest temp directory.

@@ -12,6 +12,11 @@ import logging
 
 import pytest
 
+from src.common.selection import (
+    _warn_if_stale,
+    open_superset,
+    resolve_selection,
+)
 from src.common.superset import (
     build_manifest,
     read_manifest,
@@ -20,12 +25,7 @@ from src.common.superset import (
 )
 from src.config.models import FeatureSelection, PipelineConfig
 from src.features.main import build_features
-from src.training.loader import (
-    _warn_if_stale,
-    load_superset_features,
-    open_superset,
-    resolve_selection,
-)
+from src.training.loader import load_superset_features
 
 
 def _base_data(tmp_path):

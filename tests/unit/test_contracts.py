@@ -34,15 +34,12 @@ import pandas as pd
 import pytest
 
 from src.common.schema import ColumnRole, FeatureSchema
+from src.common.selection import drop_selected_nan_rows, resolve_selection
 from src.common.splits import get_split_masks
 from src.config.models import FeatureSelection, PipelineConfig
 from src.features.main import build_features, train_val_test_split
 from src.ingestion.main import main as ingest_main
-from src.training.loader import (
-    drop_selected_nan_rows,
-    load_superset_features,
-    resolve_selection,
-)
+from src.training.loader import load_superset_features
 
 # ---------------------------------------------------------------------------
 # Contract vocabulary (docs/contracts.md §3)
