@@ -1,0 +1,360 @@
+# Experiments — lab notebook
+
+> **Template.** Copy to `EXPERIMENTS.md` (`cp EXPERIMENTS.md.example
+> EXPERIMENTS.md`) and fill it in run by run. `EXPERIMENTS.md` is gitignored
+> (regenerated research output); this `.example` file is committed and stable.
+
+This notebook records the Stage-4 experiments: what was tried, what the
+numbers were, and what was learned. One entry per experiment, grouped by
+series.
+
+## Workflow
+
+1. Edit `params.yaml` for the experiment (with the WS0 superset in place, most
+   diffs are a `features.select` edit over one frozen superset — no
+   re-featurise needed).
+2. `make train` — logs a run with the flat experiment params
+   (`temporal_strategy`, `derivative_order`, `select_groups`,
+   `superset_groups`, …) as MLflow params.
+3. `make evaluate` — scores the champion on the test split; or
+   `make evaluate RUN_ID=<id>` to score a specific run (e.g. one arm of a
+   multi-arm experiment).
+4. Fill the entry below: hypothesis, config diff, result, finding, and the
+   MLflow run id(s).
+
+**Run ↔ entry traceability.** Set `mlflow.run_tags` in `params.yaml` to link a
+run to its entry — `exp_id` matches the heading (e.g. `EXP-010`), `series` is
+the series letter. Then `make report EXP_ID=EXP-010` (or `SERIES=B`) prints the
+comparison table for those runs. The pipeline-written tags (`stage`,
+`params_hash`, `git_commit`, `manifest_sha256`, `superset_path`,
+`superset_materialisation_hash`) are reserved and rejected at config load.
+
+## Standing caveats
+
+These apply across the notebook — read them before quoting any number.
+
+- **EXP-005** — generation mix uses *actual* generation. Deployment would need
+  *forecasts*. This is a leakage risk in production, not in the experiment.
+- **EXP-002 / EXP-011** — weather features are historical *actuals*; the same
+  forecast-vs-actual caveat applies.
+- **Metrics are the Stage-2/3 set** (`rmse`, `mae`, `mape`, `r2`) until WS7
+  lands. Once WS7's early stopping is active, **validation** metrics stop being
+  an unbiased accuracy estimate — only **test** (via `make evaluate`) may be
+  quoted as one.
+- **Neural-net runs (Series D)** are non-deterministic without fixed seeds and
+  are indicative only.
+- **Stage boundary** — Stage-2/3 runs contain `mape`; Stage-4 runs will not.
+  The UI shows a gap, which is useful (it flags methodologically different
+  runs). A Stage-2/3 artifact is **not a valid Diebold–Mariano reference** (D14).
+
+---
+
+## Series A — Feature ablation
+
+*Question: which feature groups add value?*
+
+### EXP-001: Calendar features only
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-002: + weather
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-003: + lags
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-004: + weather (combined)
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-005: + generation mix
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-006: + cross-border flows
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-007: holiday-adjacent features
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+## Series B — Derivative features
+
+*Question: do explicit derivatives help?*
+
+### EXP-008: first derivative
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-009: first + second derivative
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-010: smoothing window
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-011: weather derivatives
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+## Series C — Temporal resolution
+
+*Question: does the right tick depend on the task?*
+
+### EXP-012: daily resolution
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-013: weekly resolution
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-014: 48 h horizon
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-015: 168 h horizon
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+## Series D — Architecture
+
+*Question: which model class wins?*
+
+### EXP-016: LightGBM
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-017: Ridge
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-018: Random Forest
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-019: CatBoost
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-020: LSTM
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+### EXP-021: TFT
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+## Series E — Training objective
+
+*Question: does the loss function matter?*
+
+### EXP-022: loss ablation (arms A/B/C)
+
+**Hypothesis:**
+
+**Config diff:**
+
+**Result:**
+
+**Finding:**
+
+**MLflow runs:** <!-- run ids / `mlflow.run_tags.exp_id` -->
+
+---
+
+## Appendix — illustrative filled entry (EXP-010)
+
+> **Example entry — replace or delete.** The numbers below are placeholders to
+> show the *format* of a filled entry; they are **not** a measured result.
+
+### EXP-010: smoothing window (example)
+
+**Hypothesis:** A wider smoothing window before differencing denoises the
+target derivative and improves test RMSE, up to a point where over-smoothing
+removes signal.
+
+**Config diff:** `features.derivatives.smooth_windows: [3, 6, 12]` (superset
+materialises all three); arms selected via `features.select.columns`
+(`price_diff_1_w3` / `_w6` / `_w12`). One frozen superset, three arms.
+
+**Result:** *(illustrative — not measured)*
+`price_diff_1_w3`: test RMSE 0.000 · `_w6`: 0.000 · `_w12`: 0.000.
+
+**Finding:** *(to be filled after the arms are scored with
+`make evaluate RUN_ID=`)*
+
+**MLflow runs:** <!-- e.g. abc123 (w3), def456 (w6), ghi789 (w12); tags exp_id=EXP-010, series=B -->
+

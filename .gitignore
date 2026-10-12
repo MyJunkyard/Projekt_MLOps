@@ -28,7 +28,9 @@
 #   2. Bootstrap templates ........... COMMITTED (small, hand-written, stable):
 #                                     secrets/.env.example, *.gitkeep
 #   3. Pipeline-generated output ..... IGNORED: data/, models/, reports/,
-#                                     logs/, mlruns/, mlartifacts/
+#                                     logs/, mlruns/, mlartifacts/,
+#                                     EXPERIMENTS.md (template
+#                                     EXPERIMENTS.md.example is committed)
 #   4. Secrets / local environment ... IGNORED
 #   5. Local knowledge base .......... IGNORED by design (per project decision):
 #                                     docs/ — see docs/stage1_review.md
@@ -85,6 +87,13 @@ models/*
 
 reports/*
 !reports/.gitkeep
+
+# EXPERIMENTS.md is the filled lab notebook — research output regenerated from
+# config + runs, so it is class 3 (ignored). The committed template
+# EXPERIMENTS.md.example is class 1; the negation re-includes it (same pattern
+# as secrets/: never ignore the directory, negate the specific file). WS6 D11.
+EXPERIMENTS.md
+!EXPERIMENTS.md.example
 
 logs/
 

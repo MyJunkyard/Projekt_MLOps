@@ -553,6 +553,22 @@ class EvaluationConfig(_Strict):
         return self
 
 
+#: Tags the pipeline assigns itself. A user-supplied ``mlflow.run_tags`` entry
+#: with one of these keys never reaches MLflow — see the validator below. Owned
+#: here (``config`` is a strict leaf that imports nothing from ``src``) and
+#: *imported* by ``training.registry``, not duplicated.
+RESERVED_RUN_TAGS = frozenset(
+    {
+        "stage",
+        "params_hash",
+        "git_commit",
+        "manifest_sha256",
+        "superset_path",
+        "superset_materialisation_hash",
+    }
+)
+
+
 class MlflowConfig(_Strict):
     """``mlflow`` — tracking, experiment, registry, and promotion policy."""
 
@@ -562,6 +578,33 @@ class MlflowConfig(_Strict):
     promote_to_production: bool = True
     champion_alias: str = "champion"
     run_tags: dict[str, str] = {}
+
+    @field_validator("run_tags")
+    @classmethod
+    def _run_tags_not_reserved(cls, v: dict[str, str]) -> dict[str, str]:
+        """Reject a ``run_tags`` key the pipeline owns (WS6 D4).
+
+        ``run_tags`` and the pipeline-written tags are **disjoint namespaces**:
+        the convention keys (``exp_id``, ``series``) live only in ``run_tags``
+        — no code writes them — while the six reserved keys are written only by
+        code, so a human entry under the same name can only be a forgery
+        attempt or a typo. Rejecting at load time (this module's stated
+        philosophy: *"typos fail at load time instead of mid-run"*) turns a
+        failure *after a model was trained* into a pre-flight one.
+
+        Raises:
+            ValueError: Naming the offending key when the intersection is
+                non-empty.
+        """
+        overlap = sorted(set(v) & RESERVED_RUN_TAGS)
+        if overlap:
+            raise ValueError(
+                f"mlflow.run_tags key(s) {overlap} are reserved for the "
+                "pipeline and cannot be set in params.yaml. Reserved keys: "
+                f"{sorted(RESERVED_RUN_TAGS)}. Use the convention keys "
+                "(e.g. exp_id, series) instead."
+            )
+        return v
 
 
 class ServingValidationConfig(_Strict):

@@ -22,6 +22,7 @@ from src.common.splits import get_split_masks
 from src.config import load_config
 from src.evaluation.plots import plot_actual_vs_predicted, residual_breakdown
 from src.evaluation.reporting import (
+    get_model_run_id,
     load_model_from_registry,
     load_test_features,
     log_evaluation_results,
@@ -36,8 +37,18 @@ MODULE_LOGGER_NAME = "src.evaluation.main"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
 
 
-def main() -> None:
-    """Orchestrate evaluation: metrics, plots, and residual breakdown."""
+def main(run_id: str | None = None) -> None:
+    """Orchestrate evaluation: metrics, plots, and residual breakdown.
+
+    Args:
+        run_id: Optional MLflow run ID to score on the test split instead of
+            the champion alias (WS6 D10). When given, the model is loaded from
+            that run, its columns come from that run's own schema artifact, and
+            the metrics attach to that run — so a non-champion run (a baseline,
+            or one arm of EXP-022) can be scored via ``make evaluate RUN_ID=``.
+            ``None`` (the default) keeps every existing call site on the
+            champion alias.
+    """
     cfg = load_config()
     # Configure the *package* logger by explicit name (never `__name__` —
     # under `python -m` that resolves to "__main__" and would bypass the
@@ -52,8 +63,16 @@ def main() -> None:
     logger.info("Opening feature superset")
     df, schema = open_superset(cfg)
 
-    logger.info("Resolving the champion model's feature columns")
-    feature_cols, _ = resolve_evaluate_columns(cfg, schema)
+    # WS6 (D10): resolve the scored run ONCE, then pass it to every consumer
+    # so load, column resolution, and metric logging all agree on the same
+    # run (no alias re-resolution between them). ``run_id`` given → score that
+    # run; ``None`` → the champion alias.
+    target_run = run_id if run_id is not None else get_model_run_id(cfg)
+    logger.info(
+        "Resolving feature columns for run %s",
+        target_run if target_run is not None else "champion (alias)",
+    )
+    feature_cols, _ = resolve_evaluate_columns(cfg, schema, run_id=target_run)
 
     # One frame, one NaN policy. The superset keeps warm-up NaNs, so rows are
     # dropped only where the *resolved selection* (or the target) is NaN.
@@ -67,7 +86,7 @@ def main() -> None:
     X_test, y_test = load_test_features(df_test, feature_cols, cfg.data.target_col)
 
     logger.info("Loading model from registry")
-    model = load_model_from_registry(cfg)
+    model = load_model_from_registry(cfg, run_id=target_run)
 
     logger.info("Computing predictions")
     y_pred = np.asarray(model.predict(X_test))
@@ -99,11 +118,11 @@ def main() -> None:
 
         artifact_paths = [plot_path, str(breakdown_path)]
 
-    # Log metrics and artifacts to MLflow, attached to the training run
-    # that produced the model (logging outside an active run would
-    # silently create an orphan anonymous run)
+    # Log metrics and artifacts to MLflow, attached to the scored run (the
+    # champion alias's run by default, or the explicit RUN_ID). Logging
+    # outside an active run would silently create an orphan anonymous run.
     try:
-        log_evaluation_results(cfg, metrics, artifact_paths)
+        log_evaluation_results(cfg, metrics, artifact_paths, run_id=target_run)
     except Exception as e:
         logger.warning("Could not log results to MLflow: %s", e)
 

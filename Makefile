@@ -16,9 +16,16 @@
 # commands.
 # =============================================================================
 
-.PHONY: ingest featurise train evaluate serve test lint compare all up down rebuild rebuild-api rebuild-mlflow rebuild-fresh clean clean-raw check-env
+.PHONY: ingest featurise train evaluate report serve test lint all up down rebuild rebuild-api rebuild-mlflow rebuild-fresh clean clean-raw check-env
 
 # --- Pipeline steps (run locally, need MLflow running in Docker) ---
+
+# RUN_ID / SERIES / EXP_ID let `make evaluate` and `make report` target a
+# specific run or a tagged subset (WS6). Empty by default: `make evaluate`
+# scores the champion alias, `make report` shows the whole experiment.
+RUN_ID ?=
+SERIES ?=
+EXP_ID ?=
 
 # Preflight: fail `make ingest` early with an actionable message when no
 # ENTSO-E key source is configured and synthetic fallback is not opted in.
@@ -47,7 +54,13 @@ train:
 	python -m src train
 
 evaluate:
-	python -m src evaluate
+	python -m src evaluate $(if $(RUN_ID),--run-id $(RUN_ID))
+
+# --- Cross-run comparison (WS6): read the tracking store, print a table ---
+
+report:
+	python -m src report $(if $(RUN_ID),--run-id $(RUN_ID)) \
+		$(if $(SERIES),--series $(SERIES)) $(if $(EXP_ID),--exp-id $(EXP_ID))
 
 # --- Docker management ---
 
@@ -72,13 +85,6 @@ rebuild-mlflow:
 rebuild-fresh:
 	docker compose --env-file secrets/.env build --no-cache
 	docker compose --env-file secrets/.env up -d
-
-# --- Model comparison ---
-
-compare:
-	@echo "Opening MLflow UI to compare runs..."
-	@echo "Navigate to: http://localhost:5000"
-	@docker compose exec mlflow mlflow models list || true
 
 # --- Testing and static analysis ---
 

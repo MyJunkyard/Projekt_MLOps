@@ -245,11 +245,11 @@ pytest tests/ -v
 | `make ingest` | Download raw data from ENTSO-E |
 | `make featurise` | Engineer features |
 | `make train` | Train model and register in MLflow |
-| `make evaluate` | Evaluate model and generate plots |
+| `make evaluate` | Evaluate the champion model and generate plots (`RUN_ID=<id>` scores a specific run) |
+| `make report` | Compare MLflow runs as a table (filters `SERIES=` / `EXP_ID=` / `RUN_ID=`) |
 | `make all` | Run full pipeline (ingest → featurise → train → evaluate) |
 | `make test` | Run test suite |
 | `make lint` | Run ruff + mypy |
-| `make compare` | Print MLflow runs for comparison |
 | `make clean` | Remove processed and reference data files |
 | `make clean-raw` | Remove raw data + manifests (keeps `.gitkeep` placeholders) |
 

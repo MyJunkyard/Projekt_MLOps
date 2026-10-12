@@ -20,23 +20,35 @@ MODULE_LOGGER_NAME = "src.evaluation.reporting"
 logger = logging.getLogger(MODULE_LOGGER_NAME)
 
 
-def load_model_from_registry(cfg: PipelineConfig):
-    """Load model from MLflow model registry.
+def load_model_from_registry(cfg: PipelineConfig, run_id: str | None = None):
+    """Load a model from MLflow — the champion alias by default, or a given run.
 
-    Uses the model alias specified in params.yaml (default: champion).
-    An alias points to exactly one registered version, so the loaded model
-    is unambiguous.
+    With no ``run_id`` (default) the champion alias from ``serving.model_alias``
+    is used. An alias points to exactly one registered version, so the loaded
+    model is unambiguous. The alias stays the serving-time "live pointer" to
+    the current champion.
+
+    When ``run_id`` is given (WS6 D10), the model is loaded from that run's own
+    artifact via ``runs:/{run_id}/model``. This is what lets a non-champion run
+    — a baseline, or one arm of EXP-022 — be scored on the test split.
+    (``runs:/`` addresses an unregistered run's model artifact; a
+    ``models:/<run_id>`` URI would misread the id as a registered model name
+    and fail.)
 
     Args:
         cfg: The validated ``PipelineConfig`` (uses ``mlflow`` and
             ``serving`` sections).
+        run_id: Optional MLflow run ID to score directly, bypassing the alias.
 
     Returns:
         A loaded MLflow pyfunc model.
     """
     mlflow.set_tracking_uri(cfg.mlflow.tracking_uri)
-    alias = cfg.serving.model_alias
-    model_uri = f"models:/{cfg.mlflow.model_name}@{alias}"
+    if run_id is not None:
+        model_uri = f"runs:/{run_id}/model"
+    else:
+        alias = cfg.serving.model_alias
+        model_uri = f"models:/{cfg.mlflow.model_name}@{alias}"
     logger.info("Loading model from %s", model_uri)
     model = mlflow.pyfunc.load_model(model_uri)
     return model
@@ -47,7 +59,9 @@ def get_model_run_id(cfg: PipelineConfig) -> str | None:
 
     Uses the model alias from ``serving.model_alias`` to look up the
     registered version and returns the run that created it, so evaluation
-    results can be attached to the model's own run page.
+    results can be attached to the model's own run page. This is the *single*
+    alias→run_id resolver; callers that already hold a run id (an explicit
+    ``run_id`` override) pass it through directly instead of calling here.
 
     Args:
         cfg: The validated ``PipelineConfig`` (uses ``mlflow`` and
@@ -70,7 +84,10 @@ def get_model_run_id(cfg: PipelineConfig) -> str | None:
 
 
 def log_evaluation_results(
-    cfg: PipelineConfig, metrics: dict[str, float], artifact_paths: list[str]
+    cfg: PipelineConfig,
+    metrics: dict[str, float],
+    artifact_paths: list[str],
+    run_id: str | None = None,
 ) -> None:
     """Log evaluation metrics and artifacts to MLflow.
 
@@ -80,13 +97,21 @@ def log_evaluation_results(
     logging outside any active run would silently create an orphan
     anonymous run.
 
+    When ``run_id`` is given (WS6 D10) the metrics are attached to *that*
+    run instead — so scoring a non-champion run via ``make evaluate RUN_ID=``
+    lands on the run that was actually scored, never the champion. ``None``
+    keeps the default champion-alias resolution.
+
     Args:
         cfg: The validated ``PipelineConfig`` (uses the ``mlflow`` section).
         metrics: Dict of metric name to value.
         artifact_paths: Paths of files to log as artifacts (may be empty).
+        run_id: Optional MLflow run ID to attach the results to; ``None``
+            resolves the champion run via the alias.
     """
     mlflow.set_tracking_uri(cfg.mlflow.tracking_uri)
-    run_id = get_model_run_id(cfg)
+    if run_id is None:
+        run_id = get_model_run_id(cfg)
 
     if run_id is not None:
         logger.info("Logging evaluation results to training run %s", run_id)
@@ -113,20 +138,27 @@ def _log_metrics_and_artifacts(
 
 
 def resolve_evaluate_columns(
-    cfg: PipelineConfig, schema: FeatureSchema
+    cfg: PipelineConfig, schema: FeatureSchema, run_id: str | None = None
 ) -> tuple[list[str], FeatureSchema]:
-    """Resolve which feature columns the champion model expects.
+    """Resolve which feature columns the scored model expects.
 
     WS0 decision D-c: the model-instance link is the *subset schema logged
     with the run*, not a copy of the data. Evaluation therefore reads the
-    champion run's ``config/features_schema.json`` artifact and uses exactly
+    scored run's ``config/features_schema.json`` artifact and uses exactly
     those columns, falling back to the config ``features.select`` when the
     artifact cannot be found.
+
+    With no ``run_id`` (default) the champion run is resolved via the alias;
+    when ``run_id`` is given (WS6 D10) the columns come from *that* run's own
+    schema artifact, so a ``RUN_ID=`` evaluation reads the scored run's input
+    contract — never the champion's, never the config's.
 
     Args:
         cfg: The validated ``PipelineConfig`` (uses ``mlflow``/``serving``
             sections and ``features.select``).
         schema: The full superset schema read from disk.
+        run_id: Optional MLflow run ID whose schema to read; ``None``
+            resolves the champion run via the alias.
 
     Returns:
         A tuple ``(feature_cols, subset_schema)`` where ``feature_cols`` is
@@ -136,11 +168,12 @@ def resolve_evaluate_columns(
     Raises:
         ValueError: If the run's columns are absent from the current superset
             (the superset was rebuilt without a needed feature block, or the
-            champion model was trained against a different superset).
+            scored model was trained against a different superset).
     """
     available = set(schema.feature_names())
     run_schema: FeatureSchema | None = None
-    run_id = get_model_run_id(cfg)
+    if run_id is None:
+        run_id = get_model_run_id(cfg)
 
     if run_id is not None:
         run_schema = read_feature_schema(run_id, artifact_root=None)
@@ -148,15 +181,16 @@ def resolve_evaluate_columns(
     if run_schema is not None:
         feature_cols = run_schema.feature_names()
         logger.info(
-            "Feature columns taken from champion run %s (%d columns)",
+            "Feature columns taken from run %s (%d columns)",
             run_id,
             len(feature_cols),
         )
     else:
         feature_cols = resolve_selection(schema, cfg.features.select)
         logger.warning(
-            "No feature schema on the champion run; falling back to config "
+            "No feature schema on run %s; falling back to config "
             "features.select (%s)",
+            run_id,
             selection_summary(cfg.features.select, feature_cols),
         )
 

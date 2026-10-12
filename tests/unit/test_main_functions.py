@@ -9,6 +9,7 @@ from unittest import mock
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import src.evaluation.main as evaluate_mod
 import src.features.main as featurise_mod
@@ -176,6 +177,14 @@ class TestTrainMain:
 
 
 class TestEvaluateMain:
+    # Two get_model_run_id patches, both returning None: main() resolves the
+    # scored run once through its OWN imported name (src.evaluation.main.
+    # get_model_run_id), and resolve_evaluate_columns — which runs for real
+    # here — resolves internally through src.evaluation.reporting.
+    # get_model_run_id. Patching both keeps the test hermetic (no live
+    # MlflowClient HTTP call) and treats the champion as unresolvable, so
+    # columns fall back to features.select.
+    @mock.patch("src.evaluation.main.get_model_run_id", return_value=None)
     @mock.patch("src.evaluation.reporting.get_model_run_id", return_value=None)
     @mock.patch("src.evaluation.main.log_evaluation_results")
     @mock.patch("src.evaluation.main.load_model_from_registry")
@@ -185,7 +194,8 @@ class TestEvaluateMain:
         mock_load_config,
         mock_load_model,
         mock_log_results,
-        mock_run_id,
+        mock_reporting_run_id,
+        mock_main_run_id,
         tmp_path,
         sample_config,
     ):
@@ -234,3 +244,59 @@ class TestEvaluateMain:
 
         mock_model.predict.assert_called_once()
         mock_log_results.assert_called_once()
+
+
+class TestCliDispatch:
+    """``python -m src`` dispatch: evaluate --run-id and report (WS6 D10/D12).
+
+    MLflow is mocked throughout — no tracking server in tier 1 (plan §8).
+    """
+
+    def test_evaluate_run_id_reaches_evaluation_main(self):
+        """Positive: `evaluate --run-id X` calls evaluation.main(run_id='X')."""
+        import src.cli as cli
+
+        with mock.patch.object(cli, "evaluate_main") as mock_eval:
+            with mock.patch("sys.argv", ["src", "evaluate", "--run-id", "abc123"]):
+                cli.main()
+        mock_eval.assert_called_once_with(run_id="abc123")
+
+    def test_evaluate_default_run_id_none(self):
+        """Positive: bare `evaluate` passes run_id=None (champion alias)."""
+        import src.cli as cli
+
+        with mock.patch.object(cli, "evaluate_main") as mock_eval:
+            with mock.patch("sys.argv", ["src", "evaluate"]):
+                cli.main()
+        mock_eval.assert_called_once_with(run_id=None)
+
+    def test_report_dispatches_to_report_main(self):
+        """Positive: `report --series B` reaches report.main with the flag."""
+        import src.cli as cli
+
+        with mock.patch.object(cli, "report_main") as mock_report:
+            with mock.patch("sys.argv", ["src", "report", "--series", "B"]):
+                cli.main()
+        mock_report.assert_called_once()
+        argv = mock_report.call_args.kwargs["argv"]
+        assert "--series" in argv and "B" in argv
+
+    def test_report_dm_errors_naming_ws7(self):
+        """Negative: `report --dm` builds a call whose args trigger the WS7 error."""
+        import src.cli as cli
+        from src.evaluation import report as report_mod
+
+        captured = {}
+
+        def _capture(argv):
+            captured["argv"] = argv
+
+        with mock.patch.object(cli, "report_main", side_effect=_capture):
+            with mock.patch("sys.argv", ["src", "report", "--dm"]):
+                cli.main()
+        # The dispatch forwards --dm; the report parser then rejects it naming WS7.
+        assert "--dm" in captured["argv"]
+        with mock.patch("src.config.load_config"):
+            with pytest.raises(NotImplementedError, match="WS7"):
+                report_mod.main(captured["argv"])
+

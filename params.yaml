@@ -123,7 +123,7 @@ mlflow:
   model_name: energy-forecast-model   # registered model name in MLflow registry
   promote_to_production: true   # primary model gets the champion alias; baselines never do
   champion_alias: champion      # alias name for the deployable model
-  run_tags: {}                  # filled programmatically
+  run_tags: {}                  # extra tags applied to every run (WS6). Convention keys: exp_id (matches the EXPERIMENTS.md heading), series. Reserved keys written by the pipeline are rejected at config load: stage, params_hash, git_commit, manifest_sha256, superset_path, superset_materialisation_hash.
 
 serving:
   port: 8000

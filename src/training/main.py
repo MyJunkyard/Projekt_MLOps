@@ -44,6 +44,15 @@ def main():
     X_train, y_train = X_splits[0], y_splits[0]
     X_val, y_val = X_splits[1], y_splits[1]
 
+    # Per-split row counts (WS6 D6): logged on every run so a silent row-set
+    # shift is visible in the compare table. len() counts rows *after* the
+    # warm-up/NaN policy (drop_selected_nan_rows inside the loader) — the
+    # number the model actually saw, the only one worth comparing.
+    row_counts = {
+        name: int(len(split))
+        for name, split in zip(("train", "val", "test"), X_splits, strict=True)
+    }
+
     # --- Train XGBoost ---
     logger.info("Loading model: %s", cfg.model.type)
     model = load_model(cfg.model)
@@ -71,6 +80,7 @@ def main():
         feature_schema=subset_schema,
         run_name="xgboost-v1",
         promote_to_production=True,
+        row_counts=row_counts,
     )
 
     # --- Train baselines ---
@@ -89,6 +99,7 @@ def main():
         persistence_metrics,
         cfg,
         run_name="baseline-persistence",
+        row_counts=row_counts,
     )
 
     logger.info("Training baseline: seasonal naive")
@@ -104,6 +115,7 @@ def main():
         seasonal_metrics,
         cfg,
         run_name="baseline-seasonal-naive",
+        row_counts=row_counts,
     )
 
     # --- Summary ---

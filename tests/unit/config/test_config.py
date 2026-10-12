@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from src.common.metrics import compute_metrics
 from src.config import load_config
 from src.config.models import (
+    RESERVED_RUN_TAGS,
     SUPPORTED_METRICS,
     CalendarFeature,
     CrossBorderFlowsConfig,
@@ -22,6 +23,7 @@ from src.config.models import (
     EntsoeConfig,
     FeatureSelection,
     LoggingConfig,
+    MlflowConfig,
     ModelConfig,
     PipelineConfig,
     TemporalConfig,
@@ -604,3 +606,57 @@ class TestSupportedMetricContract:
         y_pred = [1.5, 2.5, 2.0]
         result = compute_metrics(y_true, y_pred, [metric])
         assert metric in result
+
+
+# ---------------------------------------------------------------------------
+# mlflow.run_tags — reserved-key gate (WS6 D4)
+# ---------------------------------------------------------------------------
+class TestMlflowRunTags:
+    """``mlflow.run_tags`` — disjoint from the pipeline-written tags (WS6 D4)."""
+
+    def test_default_is_empty(self):
+        """Positive: no run_tags by default — nothing extra logged."""
+        assert MlflowConfig().run_tags == {}
+
+    def test_convention_keys_pass(self):
+        """Positive: exp_id/series are convention keys and are accepted."""
+        mlflow = MlflowConfig(run_tags={"exp_id": "EXP-010", "series": "B"})
+        assert mlflow.run_tags == {"exp_id": "EXP-010", "series": "B"}
+
+    @pytest.mark.parametrize("key", sorted(RESERVED_RUN_TAGS))
+    def test_reserved_key_rejected_at_load(self, key):
+        """Negative: each pipeline-owned key fails at load, naming the key."""
+        with pytest.raises(ValidationError) as exc:
+            MlflowConfig(run_tags={key: "forged"})
+        # The offending key is named so the author knows which entry to fix.
+        assert key in str(exc.value)
+
+    def test_reserved_set_is_the_six_pipeline_tags(self):
+        """The reserved set is exactly the tags the pipeline writes itself.
+
+        Pinned so adding a pipeline tag without reserving it here is caught.
+        """
+        assert RESERVED_RUN_TAGS == {
+            "stage",
+            "params_hash",
+            "git_commit",
+            "manifest_sha256",
+            "superset_path",
+            "superset_materialisation_hash",
+        }
+
+    def test_reserved_key_rejected_through_full_config(self):
+        """Negative: the gate fires on a whole-config load, not just MlflowConfig."""
+        with pytest.raises(ValidationError):
+            PipelineConfig.model_validate(
+                {
+                    "data": {
+                        "target_col": "price_eur_mwh",
+                        "train_end": "2023-12-31",
+                        "val_end": "2024-01-01",
+                    },
+                    "model": {"type": "sklearn.dummy.DummyRegressor"},
+                    "mlflow": {"run_tags": {"stage": "4"}},
+                }
+            )
+
