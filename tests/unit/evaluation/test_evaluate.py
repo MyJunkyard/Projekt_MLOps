@@ -13,7 +13,13 @@ import pytest
 from src.common.schema import FeatureSchema
 from src.common.selection import drop_selected_nan_rows, open_superset
 from src.config.models import EvaluationConfig
-from src.evaluation.plots import plot_actual_vs_predicted, residual_breakdown
+from src.evaluation.plots import (
+    plot_actual_vs_predicted,
+    plot_actual_vs_predicted_window,
+    plot_residual_breakdown,
+    plot_residuals_over_time,
+    residual_breakdown,
+)
 from src.evaluation.reporting import (
     get_model_run_id,
     load_test_features,
@@ -153,13 +159,16 @@ class TestResidualBreakdown:
         y_pred = np.array([15.0, 15.0, 35.0, 35.0, 55.0, 55.0])
         evaluation = EvaluationConfig(residual_breakdown=["hour"])
 
-        result = residual_breakdown(df, y_true, y_pred, evaluation)
+        result = residual_breakdown(df, y_true, y_pred, evaluation, quantiles=0)
         assert "grouping" in result.columns
         assert "category" in result.columns
         assert "mean_abs_residual" in result.columns
-        assert len(result) == 3  # hours 0, 1, 2
+        # quantiles=0 disables the price-quantile grouping; direction is always
+        # added, so filter to the categorical grouping for the count.
+        hour_rows = result[result["grouping"] == "hour"]
+        assert len(hour_rows) == 3  # hours 0, 1, 2
         # Hour 0: |10-15| + |20-15| / 2 = (5+5)/2 = 5
-        hour0 = result[result["category"] == 0]
+        hour0 = hour_rows[hour_rows["category"] == 0]
         assert hour0["mean_abs_residual"].iloc[0] == pytest.approx(5.0)
 
     def test_breakdown_by_is_holiday(self):
@@ -174,10 +183,11 @@ class TestResidualBreakdown:
         y_pred = np.array([10.0, 20.0, 35.0, 45.0])
         evaluation = EvaluationConfig(residual_breakdown=["is_holiday"])
 
-        result = residual_breakdown(df, y_true, y_pred, evaluation)
-        assert len(result) == 2
+        result = residual_breakdown(df, y_true, y_pred, evaluation, quantiles=0)
+        holiday_rows = result[result["grouping"] == "is_holiday"]
+        assert len(holiday_rows) == 2
         # Holidays have mean residual of (5+5)/2 = 5
-        holiday_row = result[result["category"] == True]  # noqa: E712
+        holiday_row = holiday_rows[holiday_rows["category"] == True]  # noqa: E712
         assert holiday_row["mean_abs_residual"].iloc[0] == pytest.approx(5.0)
 
     def test_returns_dataframe(self):
@@ -189,6 +199,122 @@ class TestResidualBreakdown:
 
         result = residual_breakdown(df, y_true, y_pred, evaluation)
         assert isinstance(result, pd.DataFrame)
+
+    def test_price_quantile_grouping(self):
+        """Positive (WS4): quantiles=4 bins the actual price into 4 bins."""
+        y_true = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0])
+        y_pred = y_true + 1.0
+        evaluation = EvaluationConfig(residual_breakdown=[])
+        df = pd.DataFrame({"hour": np.arange(8) % 24})
+
+        result = residual_breakdown(df, y_true, y_pred, evaluation, quantiles=4)
+        q_rows = result[result["grouping"] == "price_quantile"]
+        assert len(q_rows) == 4
+        # 8 evenly-spread values into 4 bins → 2 rows each.
+        assert (q_rows["count"] == 2).all()
+
+    def test_quantiles_zero_disables_grouping(self):
+        """Negative (WS4): quantiles=0 adds no price_quantile rows."""
+        y_true = np.array([10.0, 20.0, 30.0, 40.0])
+        y_pred = y_true
+        evaluation = EvaluationConfig(residual_breakdown=[])
+        df = pd.DataFrame({"hour": np.arange(4)})
+
+        result = residual_breakdown(df, y_true, y_pred, evaluation, quantiles=0)
+        assert not (result["grouping"] == "price_quantile").any()
+        # Direction is still always present.
+        assert (result["grouping"] == "direction").any()
+
+    def test_direction_classification(self):
+        """Positive (WS4): rising/falling/flat from the actual's own change."""
+        # diffs: nan, +1, +1, 0, -1  → rising(2), flat(1), falling(1)
+        y_true = np.array([10.0, 11.0, 12.0, 12.0, 11.0])
+        y_pred = y_true
+        evaluation = EvaluationConfig(residual_breakdown=[])
+        df = pd.DataFrame({"hour": np.arange(5)})
+
+        result = residual_breakdown(df, y_true, y_pred, evaluation, quantiles=0)
+        direction = result[result["grouping"] == "direction"].set_index("category")
+        assert direction.loc["rising", "count"] == 2
+        assert direction.loc["flat", "count"] == 1
+        assert direction.loc["falling", "count"] == 1
+        # The first row (NaN direction) is excluded from every direction group.
+        assert direction["count"].sum() == 4
+
+
+class TestResidualAnalysisPlots:
+    """WS4 step 1 — the three new residual-analysis plot functions."""
+
+    def test_residuals_over_time_creates_png(self, tmp_path):
+        """Positive: writes a non-empty PNG for a multi-row series."""
+        out = tmp_path / "rot.png"
+        ts = pd.date_range("2024-01-01", periods=48, freq="h", tz="UTC")
+        residuals = np.linspace(-5, 5, 48)
+        result = plot_residuals_over_time(ts, residuals, str(out))
+        assert result == str(out)
+        assert out.exists()
+        assert out.stat().st_size > 0
+
+    def test_residuals_over_time_single_row_no_raise(self, tmp_path):
+        """Edge: a single-row input renders without raising (rolling clamps)."""
+        out = tmp_path / "rot1.png"
+        ts = pd.date_range("2024-01-01", periods=1, freq="h", tz="UTC")
+        result = plot_residuals_over_time(ts, np.array([2.0]), str(out))
+        assert result == str(out)
+        assert out.exists()
+        assert out.stat().st_size > 0
+
+    def test_window_selects_rows_and_creates_png(self, tmp_path):
+        """Positive: a window overlapping the data renders actual-vs-predicted."""
+        out = tmp_path / "win.png"
+        ts = pd.date_range("2024-03-04", periods=168, freq="h", tz="UTC")
+        y_true = np.linspace(40, 60, 168)
+        y_pred = y_true + 1.0
+        result = plot_actual_vs_predicted_window(
+            ts, y_true, y_pred, "2024-03-04", "2024-03-11", str(out)
+        )
+        assert result == str(out)
+        assert out.exists()
+        assert out.stat().st_size > 0
+
+    def test_window_out_of_range_returns_none(self, tmp_path):
+        """Negative: a window selecting no rows returns None (no file written)."""
+        out = tmp_path / "empty.png"
+        ts = pd.date_range("2024-03-04", periods=24, freq="h", tz="UTC")
+        y_true = np.linspace(40, 60, 24)
+        y_pred = y_true
+        result = plot_actual_vs_predicted_window(
+            ts, y_true, y_pred, "2030-01-01", "2030-01-08", str(out)
+        )
+        assert result is None
+        assert not out.exists()
+
+    def test_residual_breakdown_facets_groupings(self, tmp_path):
+        """Positive: one subplot per grouping column; non-empty PNG."""
+        out = tmp_path / "breakdown.png"
+        df = pd.DataFrame(
+            {
+                "grouping": ["hour", "hour", "day_of_week", "day_of_week"],
+                "category": [0, 1, 0, 1],
+                "mean_abs_residual": [1.0, 2.0, 3.0, 4.0],
+                "count": [10, 10, 10, 10],
+            }
+        )
+        result = plot_residual_breakdown(df, str(out))
+        assert result == str(out)
+        assert out.exists()
+        assert out.stat().st_size > 0
+
+    def test_residual_breakdown_empty_frame_creates_png(self, tmp_path):
+        """Edge: an empty breakdown frame still renders a valid (empty) PNG."""
+        out = tmp_path / "empty_breakdown.png"
+        df = pd.DataFrame(
+            {"grouping": [], "category": [], "mean_abs_residual": [], "count": []}
+        )
+        result = plot_residual_breakdown(df, str(out))
+        assert result == str(out)
+        assert out.exists()
+        assert out.stat().st_size > 0
 
 
 class TestGetModelRunId:
