@@ -103,21 +103,26 @@ class TestFeaturiseMain:
 
 
 class TestTrainMain:
-    @mock.patch("src.training.main.log_to_mlflow")
-    @mock.patch("src.training.main.load_config")
-    def test_main_trains_and_logs(
-        self, mock_load_config, mock_log, tmp_path, sample_config
-    ):
-        """Positive: train.main() loads features, trains, and logs to MLflow."""
-        from src.common.superset import build_manifest, superset_paths, write_manifest
+    @staticmethod
+    def _materialise_superset(tmp_path, cfg):
+        """Build the WS0 superset + reference that ``train.main()`` reads.
+
+        96 hours of history: the 24h lag warm-up NaNs eat the first day, so
+        the per-selection dropna leaves a 24-row train/val/test split each.
+        Mutates ``cfg.data`` in place (superset_dir + reference_path under
+        ``tmp_path``) and returns ``(paths, reference)``.
+        """
+        from src.common.superset import (
+            build_manifest,
+            superset_paths,
+            write_manifest,
+        )
         from src.features.main import (
             build_features,
             save_reference_data,
             train_val_test_split,
         )
 
-        # 96 hours of history: the 24h lag warm-up NaNs eat the first day,
-        # so the per-selection dropna still leaves a 24-row train split.
         raw = pd.DataFrame(
             {
                 "timestamp": pd.date_range(
@@ -131,7 +136,6 @@ class TestTrainMain:
         reference = tmp_path / "reference" / "reference.parquet"
         superset_dir.mkdir(parents=True, exist_ok=True)
 
-        cfg = sample_config
         cfg.data.superset_dir = str(superset_dir) + "/"
         cfg.data.reference_path = str(reference)
 
@@ -148,6 +152,19 @@ class TestTrainMain:
         save_reference_data(
             train_val_test_split(frame.dropna(), cfg.data)[0], str(reference)
         )
+        return paths, reference
+
+    @mock.patch("src.training.main.log_to_mlflow")
+    @mock.patch("src.training.main.load_config")
+    def test_main_trains_and_logs(
+        self, mock_load_config, mock_log, tmp_path, sample_config
+    ):
+        """Positive: train.main() loads features, trains, and logs to MLflow."""
+        cfg = sample_config
+        paths, reference = self._materialise_superset(tmp_path, cfg)
+        # WS4: pin the val-split analysis OFF — this test pins the
+        # train-and-log flow only; the flag defaults to true in config.
+        cfg.evaluation.run_analysis_after_train = False
 
         mock_load_config.return_value = cfg
         mock_log.return_value = "run-123"
@@ -174,6 +191,107 @@ class TestTrainMain:
             "baseline-persistence",
             "baseline-seasonal-naive",
         ]
+
+    @mock.patch("src.training.main.log_evaluation_results")
+    @mock.patch("src.training.main.run_analysis")
+    @mock.patch("src.training.main.log_to_mlflow")
+    @mock.patch("src.training.main.load_config")
+    def test_main_runs_val_analysis_when_flag_true(
+        self,
+        mock_load_config,
+        mock_log,
+        mock_run_analysis,
+        mock_log_eval_results,
+        tmp_path,
+        sample_config,
+    ):
+        """WS4: flag true → val split analysed, artifacts on the primary run."""
+        from src.evaluation.analysis import AnalysisResult
+
+        cfg = sample_config
+        self._materialise_superset(tmp_path, cfg)
+        cfg.evaluation.run_analysis_after_train = True
+        cfg.evaluation.generate_plots = False  # hermetic (mocked anyway)
+        mock_load_config.return_value = cfg
+        mock_log.return_value = "run-123"
+        canned = AnalysisResult(
+            metrics={"rmse": 1.0},
+            artifact_paths=("val_residual_breakdown.csv",),
+        )
+        mock_run_analysis.return_value = canned
+
+        train_mod.main()
+
+        mock_run_analysis.assert_called_once()
+        args, kwargs = mock_run_analysis.call_args
+        # The fitted primary model, the val split of the SAME clean frame
+        # train just fitted on, and the model's own feature columns.
+        assert args[1] is mock_log.call_args_list[0][0][0]
+        assert isinstance(args[2], pd.DataFrame) and len(args[2]) == 24
+        assert args[3] == "val"  # split prefix drives the artifact names
+        assert args[4] == mock_log.call_args_list[0][1]["feature_names"]
+        assert kwargs == {}  # output_dir defaults to "reports"
+        # Artifacts-only attach (empty metrics) to the PRIMARY run id.
+        mock_log_eval_results.assert_called_once_with(
+            cfg, {}, list(canned.artifact_paths), run_id="run-123"
+        )
+
+    @mock.patch("src.training.main.run_analysis")
+    @mock.patch("src.training.main.log_to_mlflow")
+    @mock.patch("src.training.main.load_config")
+    def test_main_skips_val_analysis_when_flag_false(
+        self,
+        mock_load_config,
+        mock_log,
+        mock_run_analysis,
+        tmp_path,
+        sample_config,
+    ):
+        """WS4: flag false → training completes with no analysis call."""
+        cfg = sample_config
+        self._materialise_superset(tmp_path, cfg)
+        cfg.evaluation.run_analysis_after_train = False
+        mock_load_config.return_value = cfg
+        mock_log.return_value = "run-123"
+
+        train_mod.main()
+
+        mock_run_analysis.assert_not_called()
+
+    @mock.patch(
+        "src.training.main.log_evaluation_results",
+        side_effect=Exception("mlflow down"),
+    )
+    @mock.patch("src.training.main.run_analysis")
+    @mock.patch("src.training.main.log_to_mlflow")
+    @mock.patch("src.training.main.load_config")
+    def test_main_survives_artifact_attach_failure(
+        self,
+        mock_load_config,
+        mock_log,
+        mock_run_analysis,
+        mock_log_eval_results,
+        tmp_path,
+        sample_config,
+    ):
+        """WS4: a failing artifact attach is a WARNING, never a failed run."""
+        from src.evaluation.analysis import AnalysisResult
+
+        cfg = sample_config
+        self._materialise_superset(tmp_path, cfg)
+        cfg.evaluation.run_analysis_after_train = True
+        cfg.evaluation.generate_plots = False
+        mock_load_config.return_value = cfg
+        mock_log.return_value = "run-123"
+        mock_run_analysis.return_value = AnalysisResult(
+            metrics={"rmse": 1.0},
+            artifact_paths=("val_residual_breakdown.csv",),
+        )
+
+        train_mod.main()  # must not raise
+
+        mock_run_analysis.assert_called_once()
+        mock_log_eval_results.assert_called_once()
 
 
 class TestEvaluateMain:
@@ -244,6 +362,60 @@ class TestEvaluateMain:
 
         mock_model.predict.assert_called_once()
         mock_log_results.assert_called_once()
+
+    @mock.patch("src.evaluation.main.get_model_run_id", return_value=None)
+    @mock.patch("src.evaluation.reporting.get_model_run_id", return_value=None)
+    @mock.patch("src.evaluation.main.log_evaluation_results")
+    @mock.patch("src.evaluation.main.load_model_from_registry")
+    @mock.patch("src.evaluation.main.load_config")
+    def test_main_delegates_to_run_analysis(
+        self,
+        mock_load_config,
+        mock_load_model,
+        mock_log_results,
+        mock_reporting_run_id,
+        mock_main_run_id,
+        superset_dir,
+        sample_config,
+    ):
+        """WS4: the test split is delegated to ``run_analysis`` (D4-b/D4-c).
+
+        The canned result's metrics and split-prefixed artifact paths must
+        reach ``log_evaluation_results`` untouched — this pins the
+        delegation seam between ``main`` and the orchestrator.
+        """
+        from pathlib import Path
+
+        from src.evaluation.analysis import AnalysisResult
+
+        cfg = sample_config  # superset_dir already repointed at tmp_path
+        # Hermetic: no reports/ writes (run_analysis is mocked anyway).
+        cfg.evaluation.generate_plots = False
+        mock_load_config.return_value = cfg
+        mock_model = mock.MagicMock()
+        mock_load_model.return_value = mock_model
+
+        canned = AnalysisResult(
+            metrics={"rmse": 1.0, "mae": 0.5},
+            artifact_paths=("test_residual_breakdown.csv",),
+        )
+        with mock.patch(
+            "src.evaluation.main.run_analysis", return_value=canned
+        ) as mock_run:
+            evaluate_mod.main()
+
+        args, kwargs = mock_run.call_args
+        assert args[1] is mock_model  # the registry-loaded model
+        assert isinstance(args[2], pd.DataFrame) and len(args[2]) > 0
+        assert args[3] == "test"  # split prefix drives the artifact names
+        assert isinstance(args[4], list) and args[4]  # resolved feature cols
+        assert kwargs == {"output_dir": Path("reports")}
+        mock_log_results.assert_called_once_with(
+            cfg,
+            canned.metrics,
+            list(canned.artifact_paths),
+            run_id=None,
+        )
 
 
 class TestCliDispatch:

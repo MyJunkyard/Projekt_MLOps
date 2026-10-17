@@ -2,9 +2,10 @@
 training/main.py — Training orchestration.
 
 Orchestrates: load features → fit XGBoost + baselines → evaluate on
-val → log to MLflow. The only place in the training package that knows
-the run order. Moved verbatim from ``train.py`` (Workstream 0 module
-restructure).
+val → log to MLflow → val-split residual analysis (WS4, gated on
+``evaluation.run_analysis_after_train``). The only place in the
+training package that knows the run order. Moved verbatim from
+``train.py`` (Workstream 0 module restructure).
 """
 
 import logging
@@ -13,7 +14,10 @@ import numpy as np
 
 from src.common.logsetup import setup_logging
 from src.common.metrics import compute_metrics
+from src.common.splits import get_split_masks
 from src.config import load_config
+from src.evaluation.analysis import run_analysis
+from src.evaluation.reporting import log_evaluation_results
 from src.training.baselines import (
     train_baseline_persistence,
     train_baseline_seasonal_naive,
@@ -40,7 +44,7 @@ def main():
     logger.info("Stage: training")
     logger.info("Loading features from the superset")
     loaded = load_superset_features(cfg)
-    X_splits, y_splits, feature_names, subset_schema, _ = loaded
+    X_splits, y_splits, feature_names, subset_schema, clean_frame = loaded
     X_train, y_train = X_splits[0], y_splits[0]
     X_val, y_val = X_splits[1], y_splits[1]
 
@@ -71,8 +75,9 @@ def main():
     logger.info("Logging XGBoost to MLflow")
     # Primary model: promoted to the champion alias. The *subset* schema is
     # logged so evaluation and serving read the model's own input contract
-    # (WS0 decision D-c) rather than re-deriving it from config.
-    log_to_mlflow(
+    # (WS0 decision D-c) rather than re-deriving it from config. The returned
+    # run id anchors the WS4 val-split analysis artifacts below.
+    primary_run_id = log_to_mlflow(
         model,
         metrics,
         cfg,
@@ -82,6 +87,28 @@ def main():
         promote_to_production=True,
         row_counts=row_counts,
     )
+
+    # WS4 (D4): val-split residual analysis, gated on the config flag. The
+    # artifacts attach to the PRIMARY run — the one carrying the champion
+    # alias — so train (val) and evaluate (test) emit the same artifact
+    # family under split-prefixed names (D4-c). The empty metrics dict means
+    # "artifacts only": train already logged its val metrics above. A failed
+    # attach is a WARNING, never a failed training run (mirrors evaluate).
+    if cfg.evaluation.run_analysis_after_train:
+        _, val_mask, _ = get_split_masks(clean_frame, cfg.data)
+        df_val = clean_frame[val_mask].reset_index(drop=True)
+        result = run_analysis(cfg, model, df_val, "val", feature_names)
+        try:
+            log_evaluation_results(
+                cfg, {}, list(result.artifact_paths), run_id=primary_run_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not attach val-split analysis artifacts: %s", exc
+            )
+        logger.info(
+            "Val-split residual analysis attached to run %s", primary_run_id
+        )
 
     # --- Train baselines ---
     # Baselines are registered for comparison but NEVER promoted

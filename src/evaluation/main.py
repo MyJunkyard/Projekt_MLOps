@@ -1,10 +1,11 @@
 """
 evaluation/main.py — Evaluation orchestration.
 
-Orchestrates: load test features → predict with champion model →
-compute metrics → plots/residual breakdown → log to MLflow. The only
-place in the evaluation package that knows the run order. Moved
-verbatim from ``evaluate.py`` (Workstream 0 module restructure).
+Orchestrates: open the superset → resolve the scored run + feature
+columns → build the test frame → run the shared residual analysis
+(metrics + plots + breakdown, WS4) → log to MLflow. The only place in
+the evaluation package that knows the run order. Moved verbatim from
+``evaluate.py`` (Workstream 0 module restructure).
 """
 
 import logging
@@ -14,18 +15,14 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless backend (no display needed)
 
-import numpy as np
-
 from src.common.logsetup import setup_logging
-from src.common.metrics import compute_metrics
 from src.common.selection import drop_selected_nan_rows, open_superset
 from src.common.splits import get_split_masks
 from src.config import load_config
-from src.evaluation.plots import plot_actual_vs_predicted, residual_breakdown
+from src.evaluation.analysis import run_analysis
 from src.evaluation.reporting import (
     get_model_run_id,
     load_model_from_registry,
-    load_test_features,
     log_evaluation_results,
     log_results_table,
     resolve_evaluate_columns,
@@ -76,53 +73,35 @@ def main(run_id: str | None = None) -> None:
 
     # One frame, one NaN policy. The superset keeps warm-up NaNs, so rows are
     # dropped only where the *resolved selection* (or the target) is NaN.
-    # Everything below is derived from this single filtered frame, so
-    # y_test/y_pred and df_test stay row-aligned for the residual breakdowns.
+    # Everything below derives from this single filtered frame, so the
+    # analysis sees exactly the rows the split owns (WS0 row-alignment).
     logger.info("Building the test frame")
     df_clean = drop_selected_nan_rows(df, feature_cols, cfg.data.target_col)
     _, _, test_mask = get_split_masks(df_clean, cfg.data)
     df_test = df_clean[test_mask].reset_index(drop=True)
 
-    X_test, y_test = load_test_features(df_test, feature_cols, cfg.data.target_col)
-
     logger.info("Loading model from registry")
     model = load_model_from_registry(cfg, run_id=target_run)
 
-    logger.info("Computing predictions")
-    y_pred = np.asarray(model.predict(X_test))
-
-    logger.info("Computing metrics")
-    metrics = compute_metrics(y_test, y_pred, cfg.evaluation.metrics)
-    log_results_table(metrics)
-
-    artifact_paths: list[str] = []
-
-    # Generate plots if enabled
-    if cfg.evaluation.generate_plots:
-        reports_dir.mkdir(parents=True, exist_ok=True)
-
-        logger.info("Generating plots")
-        plot_path = plot_actual_vs_predicted(
-            y_test, y_pred, str(reports_dir / "actual_vs_predicted.png")
-        )
-
-        logger.info("Computing residual breakdown")
-        breakdown_df = residual_breakdown(df_test, y_test, y_pred, cfg.evaluation)
-
-        logger.debug("Residual breakdown:\n%s", breakdown_df.to_string(index=False))
-
-        # Save residual breakdown to CSV
-        breakdown_path = reports_dir / "residual_breakdown.csv"
-        breakdown_df.to_csv(breakdown_path, index=False)
-        logger.info("Residual breakdown saved to %s", breakdown_path)
-
-        artifact_paths = [plot_path, str(breakdown_path)]
+    # WS4: one call owns metrics + every residual artifact for the split
+    # (split-prefixed, D4-c). `evaluate` always analyses — it is the scoring
+    # stage; `run_analysis_after_train` governs only `train`. The results
+    # table reads `result.metrics` so there is a single source of truth;
+    # `generate_plots: false` keeps the hermetic path (metrics only, no
+    # `reports/` writes, empty `artifact_paths`).
+    logger.info("Running test-split residual analysis")
+    result = run_analysis(
+        cfg, model, df_test, "test", feature_cols, output_dir=reports_dir
+    )
+    log_results_table(result.metrics)
 
     # Log metrics and artifacts to MLflow, attached to the scored run (the
     # champion alias's run by default, or the explicit RUN_ID). Logging
     # outside an active run would silently create an orphan anonymous run.
     try:
-        log_evaluation_results(cfg, metrics, artifact_paths, run_id=target_run)
+        log_evaluation_results(
+            cfg, result.metrics, list(result.artifact_paths), run_id=target_run
+        )
     except Exception as e:
         logger.warning("Could not log results to MLflow: %s", e)
 

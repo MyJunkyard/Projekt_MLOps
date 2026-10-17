@@ -243,6 +243,9 @@ class TestOnlyPrimaryModelPromoted:
         sample_config_stage2.features.select = FeatureSelection(
             columns=CALENDAR_COLUMNS
         )
+        # WS4: pin the val-split analysis OFF — this test pins promotion
+        # behaviour only; the flag defaults to true in EvaluationConfig.
+        sample_config_stage2.evaluation.run_analysis_after_train = False
         mock_load_config.return_value = sample_config_stage2
         train_main()
 
