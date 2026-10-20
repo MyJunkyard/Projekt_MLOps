@@ -49,8 +49,12 @@ from pydantic import (
 # Vocabulary (shared contracts, defined here so this module stays a leaf)
 # ---------------------------------------------------------------------------
 
-#: Metric names understood by ``common.metrics.compute_metrics``.
-SupportedMetric = Literal["rmse", "mae", "mape", "r2"]
+#: Metric names understood by ``common.metrics.compute_metrics`` (WS7: the
+#: Stage-4 set — ``mape`` removed, ``mase`` opt-in; parent-plan D9 and
+#: ``docs/metrics_research.md``). Kept in lock-step with what
+#: ``common.metrics`` actually implements by the parametrized contract
+#: test ``TestSupportedMetricContract``.
+SupportedMetric = Literal["mae", "rmse", "smape", "rmae", "mase", "r2"]
 
 SUPPORTED_METRICS: frozenset[str] = frozenset(get_args(SupportedMetric))
 
@@ -520,17 +524,21 @@ class ModelConfig(_Strict):
 class EvaluationConfig(_Strict):
     """``evaluation`` — metrics, plots, and residual breakdown columns."""
 
-    primary_metric: SupportedMetric = "rmse"
-    metrics: list[SupportedMetric] = ["rmse", "mae", "mape", "r2"]
+    primary_metric: SupportedMetric = "mae"
+    metrics: list[SupportedMetric] = ["mae", "rmse", "smape", "rmae", "r2"]
     generate_plots: bool = True
     residual_breakdown: list[str] = ["hour", "day_of_week", "month", "is_holiday"]
     # WS4 residual-analysis controls (inert until src/evaluation/analysis.py).
     residual_quantiles: int = 5
     sample_week: date | None = None
     run_analysis_after_train: bool = True
-    # WS7 metric plumbing (consumed from step 5 on).
+    # WS7 metric plumbing (parent D9 set consumed from step 1 on;
+    # naive_period/dm_test/dm_reference_run_id consumed from step 5 on —
+    # see docs/stage4_ws7_implementation_plan.md).
     naive_period: PositiveInt = 168
     dm_test: bool = True
+    # Fixed DM reference run (WS7 local D8); filled by step 5b per parent D14.
+    dm_reference_run_id: str | None = None
 
     @field_validator("residual_quantiles")
     @classmethod

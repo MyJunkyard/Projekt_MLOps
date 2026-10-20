@@ -71,6 +71,13 @@ class TestLoadConfig:
         assert cfg.evaluation.sample_week == date(2024, 3, 4)
         assert cfg.evaluation.naive_period == 168
         assert cfg.evaluation.dm_test is True
+        # WS7 step 1 (§4.0): the Stage-4 metric set from the real params.yaml
+        assert cfg.evaluation.primary_metric == "mae"
+        assert cfg.evaluation.metrics == ["mae", "rmse", "smape", "rmae", "r2"]
+        assert "mape" not in cfg.evaluation.metrics
+        assert cfg.evaluation.dm_reference_run_id is None
+        assert cfg.model.params["early_stopping_rounds"] == 50
+        assert cfg.model.params["objective"] == "reg:squarederror"
 
     def test_minimal_yaml_fills_defaults(self, tmp_path):
         """Positive: a minimal config validates; defaults fill the rest."""
@@ -509,6 +516,24 @@ class TestEvaluationControls:
         assert ev.run_analysis_after_train is True
         assert ev.naive_period == 168
         assert ev.dm_test is True
+        # WS7 step 1: the Stage-4 metric defaults (parent D9) + DM slot (D8)
+        assert ev.primary_metric == "mae"
+        assert ev.metrics == ["mae", "rmse", "smape", "rmae", "r2"]
+        assert ev.dm_reference_run_id is None
+
+    def test_dm_reference_run_id_accepts_run_id(self):
+        """Positive: the DM reference slot holds a run id when set (D8)."""
+        raw = _minimal_raw()
+        raw["evaluation"] = {"dm_reference_run_id": "abc123def456"}
+        cfg = PipelineConfig.model_validate(raw)
+        assert cfg.evaluation.dm_reference_run_id == "abc123def456"
+
+    def test_removed_mape_metric_raises(self):
+        """Negative: 'mape' left in a config fails at load (WS7 removed it)."""
+        raw = _minimal_raw()
+        raw["evaluation"] = {"metrics": ["mae", "rmse", "mape"]}
+        with pytest.raises(ValidationError, match="mape"):
+            PipelineConfig.model_validate(raw)
 
     @pytest.mark.parametrize("bad", [-1, -5])
     def test_negative_quantiles_raise(self, bad):
@@ -601,10 +626,21 @@ class TestEntsoeConfigZone:
 class TestSupportedMetricContract:
     @pytest.mark.parametrize("metric", sorted(SUPPORTED_METRICS))
     def test_compute_metrics_implements_every_supported_metric(self, metric):
-        """Contract: compute_metrics produces a value for every Literal member."""
-        y_true = [1.0, 2.0, 3.0]
-        y_pred = [1.5, 2.5, 2.0]
-        result = compute_metrics(y_true, y_pred, [metric])
+        """Contract: compute_metrics produces a value for every Literal member.
+
+        The scaled metrics (rmae/mase) additionally need ``naive_period``/
+        ``y_train`` (WS7 local D2), so the window inputs are always passed
+        here — they are inert for mae/rmse/smape/r2.
+        """
+        y_true = [1.0, 2.0, 3.0, 4.0]
+        y_pred = [1.5, 2.5, 2.0, 3.0]
+        result = compute_metrics(
+            y_true,
+            y_pred,
+            [metric],
+            y_train=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            naive_period=2,
+        )
         assert metric in result
 
 

@@ -158,7 +158,7 @@ class TestEndToEndPipeline:
         assert np.isfinite(y_pred).all()
         assert "rmse" in metrics
         assert "mae" in metrics
-        assert "mape" in metrics
+        assert "smape" in metrics  # WS7: the Stage-4 set — mape is gone
         assert "r2" in metrics
         assert metrics["rmse"] >= 0.0
         assert metrics["mae"] >= 0.0

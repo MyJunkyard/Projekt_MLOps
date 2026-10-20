@@ -93,18 +93,23 @@ features:
   select: null
 
 model:
-  # Stage 2: XGBoost for real model
+  # Stage 4 (WS7 §2.8 / F1-F6): 1500 rounds with early stopping is the
+  # baseline, not a tuning step; eval_metric/objective pin the training
+  # procedure across the experiment grid (D10/D13).
   type: xgboost.XGBRegressor
   params:
-    n_estimators: 500
+    n_estimators: 1500          # §2.8/F5: 1000+ is a Stage-4 baseline, not a tuning step
+    early_stopping_rounds: 50   # §2.8/F1: popped before class construction, passed to fit()
+    eval_metric: mae            # §2.8/F6: XGBoost vocabulary is mae|rmse only; pinned (D10)
+    objective: reg:squarederror # §2.8/F6/F7: explicit; pinned across EXP-022 arms (D13)
     max_depth: 6
     learning_rate: 0.05
     subsample: 0.8
     colsample_bytree: 0.8
 
 evaluation:
-  primary_metric: rmse          # used for model comparison and early stopping
-  metrics: [rmse, mae, mape, r2]   # Stage 2: full metrics
+  primary_metric: mae           # WS7 D9: the ranking metric; feeds the DM loss binding (D12)
+  metrics: [mae, rmse, smape, rmae, r2]  # CHANGED (WS7): mape removed; mase is opt-in
   generate_plots: true             # generate actual-vs-predicted and residual plots
   residual_breakdown:           # which categorical variables to break residuals by
     - hour
@@ -116,6 +121,7 @@ evaluation:
   run_analysis_after_train: true    # WS4: train() runs the shared residual analysis
   naive_period: 168                 # WS7: seasonal-naive lag in native steps (for rmae/mase)
   dm_test: true                     # WS7: Diebold-Mariano significance vs the reference run
+  dm_reference_run_id: null         # WS7 D8: filled by step 5b per parent D14
 
 mlflow:
   tracking_uri: http://localhost:5000

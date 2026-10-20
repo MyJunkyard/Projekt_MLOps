@@ -151,8 +151,11 @@ def sample_config_stage2() -> PipelineConfig:
                 },
             },
             "evaluation": {
-                "primary_metric": "rmse",
-                "metrics": ["rmse", "mae", "mape", "r2"],
+                # rmae joins this list once WS7 steps 4-6 thread
+                # naive_period into compute_metrics (fixture configs must
+                # stay green before that lands).
+                "primary_metric": "mae",
+                "metrics": ["mae", "rmse", "smape", "r2"],
                 "generate_plots": True,
                 "residual_breakdown": ["hour", "day_of_week", "month", "is_holiday"],
             },
